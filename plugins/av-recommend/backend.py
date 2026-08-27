@@ -45,8 +45,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 9
-PERSONALIZED_MODEL_VERSION = "personal-v9"
+RECOMMENDATION_ALGORITHM_VERSION = 11
+PERSONALIZED_MODEL_VERSION = "personal-v11"
 STABLE_MODEL_VERSION = "stable-v1"
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
@@ -1132,6 +1132,7 @@ async def _library_profile() -> dict[str, Any]:
         "media_count": 0,
         "codes": set(),
         "media_by_code": {},
+        "code_weights": {},
         "actors": Counter(),
         "actor_identities": Counter(),
         "genres": Counter(),
@@ -1161,6 +1162,7 @@ async def _library_profile() -> dict[str, Any]:
             "media_count": len(media),
             "codes": set(),
             "media_by_code": {},
+            "code_weights": {},
             "actors": Counter(),
             "actor_identities": Counter(),
             "genres": Counter(),
@@ -1203,6 +1205,7 @@ async def _library_profile() -> dict[str, Any]:
                 if code:
                     profile["codes"].add(code)
                     profile["media_by_code"][code] = _entity_payload(media_by_id.get(edge.source_entity_id)) if media_by_id.get(edge.source_entity_id) else None
+                    profile["code_weights"][code] = max(float(profile["code_weights"].get(code) or 0), float(media_weights.get(edge.source_entity_id, 1.0)))
                     semantic_work_weights[code] = max(semantic_work_weights.get(code, 0), media_weights.get(edge.source_entity_id, 1.0))
             elif rel == "HAS_ACTOR":
                 actor_name = canonical_actor_name(target.label)
@@ -2004,6 +2007,20 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         personalized_score += boost
         feedback_score += boost
         reasons.append("近期查看意向")
+    neighbor_score = float(item.get("neighbor_score") or 0)
+    if neighbor_score > 0:
+        boost = min(14, math.log2(1 + neighbor_score) * 5.2)
+        score += boost
+        personalized_score += boost
+        relationship_preference_score += boost
+        evidence_rows = item.get("neighbor_evidence") if isinstance(item.get("neighbor_evidence"), list) else []
+        labels = []
+        for evidence_row in evidence_rows[:2]:
+            for reason in (evidence_row.get("reasons") or [])[:2]:
+                label = str(reason.get("label") or "").strip() if isinstance(reason, dict) else ""
+                if label and label not in labels:
+                    labels.append(label)
+        reasons.insert(min(2, len(reasons)), "邻域相似" + ("：" + "/".join(labels[:3]) if labels else ""))
     release = str(item.get("release_date") or item.get("date") or "")
     if release.startswith("2026"):
         score += 4
@@ -2491,6 +2508,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     if source_mode == "full" and _backfill_candidate_pool_title_profiles(pool):
         _save_pool(pool)
     pool_items = pool.get("items") if isinstance(pool.get("items"), dict) else {}
+    similarity_meta: dict[str, Any] = {}
     if source_mode == "full":
         candidates = [dict(item) for item in pool_items.values() if isinstance(item, dict)]
         warnings: list[str] = []
@@ -2507,6 +2525,33 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 if not item.get("source_tags"):
                     item["source_tags"] = list(persisted.get("source_tags") or [])
                 item["is_today_increment"] = bool(persisted.get("is_today_increment"))
+
+    try:
+        from app.knowledge.intelligence import work_similarity_candidates
+        similarity_meta = await work_similarity_candidates(profile.get("code_weights") or {code: 1.0 for code in profile.get("codes") or set()}, limit=160)
+        by_code = {_candidate_code(item): item for item in candidates if _candidate_code(item)}
+        for neighbor in similarity_meta.get("items") or []:
+            code = _candidate_code(neighbor)
+            if not code:
+                continue
+            existing = by_code.get(code)
+            if existing is None:
+                existing = dict(neighbor)
+                existing["source_tags"] = [{"id": "intelligence-neighbor", "label": "Core 邻域"}]
+                candidates.append(existing)
+                by_code[code] = existing
+            else:
+                existing["neighbor_score"] = neighbor.get("neighbor_score")
+                existing["neighbor_evidence"] = neighbor.get("neighbor_evidence") or []
+                for key in ("actors", "categories", "maker", "series", "director", "cover_url", "release_date"):
+                    if not existing.get(key) and neighbor.get(key):
+                        existing[key] = neighbor[key]
+                tags = list(existing.get("source_tags") or [])
+                if not any(str(tag.get("id") or "") == "intelligence-neighbor" for tag in tags if isinstance(tag, dict)):
+                    tags.append({"id": "intelligence-neighbor", "label": "Core 邻域"})
+                existing["source_tags"] = tags
+    except Exception as exc:
+        warnings.append(f"Core 邻域召回暂不可用：{exc}")
 
     excluded_codes = set(profile.get("codes") or set())
     excluded_codes.update(live_codes)
@@ -2578,6 +2623,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "disliked": len([x for x in feedback["disliked_codes"] if x]),
             "cold_start": {"active": cold_start_strength > 0, "strength": round(cold_start_strength, 3), "threshold": cold_start_threshold},
             "model_evaluation": _model_evaluation(store),
+            "neighbor_recall": {"seeds": int(similarity_meta.get("seed_count") or 0), "candidates": len(similarity_meta.get("items") or []), "linked_works": int(similarity_meta.get("linked_work_count") or 0)},
         },
         "candidate_meta": {"pool": _candidate_pool_stats(pool)},
         "filtered": _filtered_summary(filtered_diagnostics),
@@ -2603,7 +2649,7 @@ async def _prewarm_recommendations(config: dict[str, Any], *, force: bool = Fals
         modes.append("full")
     try:
         for source_mode in modes:
-            await _recommendations(config, {"source_mode": source_mode, "limit": 48, "refresh": force})
+            await _recommendations(config, {"source_mode": source_mode, "limit": 60, "refresh": force})
             _prewarm_state["modes"] = [*_prewarm_state.get("modes", []), source_mode]
         _prewarm_state.update({"status": "idle", "last_finished_at": dt.datetime.now(dt.timezone.utc).isoformat()})
     except asyncio.CancelledError:
