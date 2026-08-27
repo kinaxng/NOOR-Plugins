@@ -1828,7 +1828,7 @@ async def _enrich_recommendation_resources(
         async with semaphore:
             try:
                 result = await runtime.search_resources(
-                    {"keyword": code, "provider_timeout_seconds": 5},
+                    {"keyword": code, "provider_timeout_seconds": 5, "intelligence_cache": "prefer"},
                     limit_per_plugin=8,
                 )
             except Exception as exc:
@@ -1918,10 +1918,16 @@ async def _enrich_recommendation_resources(
     tasks = [asyncio.create_task(enrich_one(item)) for item in targets]
     _done, pending = await asyncio.wait(tasks, timeout=budget_seconds)
     if pending:
+        pending_codes = [str(targets[index].get("code") or "") for index, task in enumerate(tasks) if task in pending]
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        warnings.append(f"资源确认已达 {budget_seconds:g} 秒页面预算，剩余 {len(pending)} 项已跳过，不影响推荐展示")
+        try:
+            from app.knowledge.intelligence import enqueue_resource_refresh
+            queued = await enqueue_resource_refresh(pending_codes, priority=20)
+        except Exception:
+            queued = 0
+        warnings.append(f"资源确认已达 {budget_seconds:g} 秒页面预算，剩余 {len(pending)} 项已转入后台持续确认" if queued else f"资源确认已达 {budget_seconds:g} 秒页面预算，剩余 {len(pending)} 项将在稍后重试")
     return warnings[:8]
 
 
@@ -1939,6 +1945,36 @@ def _dedupe_recommendations(items: list[dict[str, Any]]) -> list[dict[str, Any]]
         seen.add(code)
         deduped.append(item)
     return deduped
+
+
+async def _merge_cached_resource_intelligence(result: dict[str, Any]) -> dict[str, Any]:
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    if not items:
+        return result
+    try:
+        from app.knowledge.intelligence import cached_resource_summary_map
+        summaries = await cached_resource_summary_map([str(item.get("code") or "") for item in items if isinstance(item, dict)])
+    except Exception:
+        return result
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        code = _norm_code(item.get("code"))
+        summary = summaries.get(code)
+        if not summary:
+            continue
+        item["resource_summary"] = {
+            "total": summary["total"],
+            "providers": summary["providers"],
+            "has_private": summary["has_private"],
+            "has_public": summary["has_public"],
+            "has_uncensored": summary["has_uncensored"],
+            "from_intelligence_core": True,
+        }
+        item["has_cnsub"] = bool(item.get("has_cnsub") or summary["has_subtitle"])
+        item["is_cracked"] = bool(item.get("is_cracked") or summary["has_cracked"])
+        item["is_uncensored"] = bool(item.get("is_uncensored") or summary["has_uncensored"])
+    return result
 
 
 def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2047,7 +2083,7 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     if not payload.get("refresh"):
         cached = _recommendation_cache_get(fast_cache_key, cache_ttl)
         if cached is not None:
-            return cached
+            return await _merge_cached_resource_intelligence(cached)
 
     profile = await _library_profile()
     live_codes, live_warning = await _live_library_codes(config, force=bool(payload.get("refresh")))
@@ -2069,7 +2105,7 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     if not payload.get("refresh"):
         cached = _recommendation_cache_get(cache_key, cache_ttl)
         if cached is not None:
-            return cached
+            return await _merge_cached_resource_intelligence(cached)
 
     pool = _pool()
     if source_mode == "full" and _backfill_candidate_pool_title_profiles(pool):

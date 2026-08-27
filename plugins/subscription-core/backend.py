@@ -687,7 +687,7 @@ async def _search_resources(code: str, limit: int = 24) -> list[dict[str, Any]]:
     from app.plugins.runtime import runtime
 
     query = {"keyword": code, "q": code, "code": code, "number": code, "limit": limit, "mode": "deep", "page": 1, "max_items": 100}
-    data = await runtime.search_resources(query, limit_per_plugin=limit)
+    data = await runtime.search_resources({**query, "intelligence_cache": "prefer"}, limit_per_plugin=limit)
     groups = data.get("groups") if isinstance(data, dict) else data
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
