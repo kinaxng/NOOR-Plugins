@@ -20,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, semantic_tokens
+from app.knowledge.intelligence import actor_alias_names, canonical_actor_name, semantic_tokens
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -462,6 +462,8 @@ def _feedback_counter(entries: Any, key: str) -> Counter:
         for value in entry.get(key) or []:
             text = str(value or "").strip()
             if text:
+                if key == "actors":
+                    text = canonical_actor_name(text)
                 counter[text] += 1
     return counter
 
@@ -833,6 +835,10 @@ def _is_actor_name_term(term: str, actor_names: set[str]) -> bool:
     )
 
 
+def _actor_name_keys(actor_names: set[str]) -> set[str]:
+    return {_norm_key(re.sub(r"[\s\u3000・·._\-]", "", name)) for name in actor_names if str(name or "").strip()}
+
+
 def _work_profile_actor_names(work: WorkProfile) -> set[str]:
     names: set[str] = set()
     for facts in (work.facts or {}).values():
@@ -1045,8 +1051,9 @@ async def _library_profile() -> dict[str, Any]:
                     profile["media_by_code"][code] = _entity_payload(media_by_id.get(edge.source_entity_id)) if media_by_id.get(edge.source_entity_id) else None
                     semantic_work_weights[code] = max(semantic_work_weights.get(code, 0), media_weights.get(edge.source_entity_id, 1.0))
             elif rel == "HAS_ACTOR":
-                profile["actors"][target.label] += media_weights.get(edge.source_entity_id, 1.0)
-                relations_by_media[edge.source_entity_id]["actors"].add(target.label)
+                actor_name = canonical_actor_name(target.label)
+                profile["actors"][actor_name] += media_weights.get(edge.source_entity_id, 1.0)
+                relations_by_media[edge.source_entity_id]["actors"].add(actor_name)
             elif rel == "HAS_GENRE":
                 profile["genres"][target.label] += media_weights.get(edge.source_entity_id, 1.0)
                 relations_by_media[edge.source_entity_id]["categories"].add(target.label)
@@ -1073,6 +1080,7 @@ async def _library_profile() -> dict[str, Any]:
             semantic_actor_names.update(str(name).strip() for name in actor_rows.scalars() if str(name or "").strip())
         except SQLAlchemyError:
             pass
+        semantic_actor_keys = _actor_name_keys(semantic_actor_names)
         signature = _title_profile_signature(media, media_weights)
         title_profile = _load_title_profile_cache(signature)
         if title_profile is None:
@@ -1085,10 +1093,11 @@ async def _library_profile() -> dict[str, Any]:
                 work_rows = await db.execute(select(WorkProfile).where(WorkProfile.code.in_(semantic_work_weights)))
                 for work in work_rows.scalars().all():
                     weight = semantic_work_weights.get(work.code, 1.0)
-                    work_actor_names = semantic_actor_names | _work_profile_actor_names(work)
+                    work_actor_keys = semantic_actor_keys | _actor_name_keys(_work_profile_actor_names(work))
                     weighted_terms = (work.tokens or {}).get("weighted") if isinstance(work.tokens, dict) else {}
                     for term, term_weight in (weighted_terms or {}).items():
-                        if len(str(term)) >= 2 and not _is_actor_name_term(str(term), work_actor_names):
+                        term_key = _norm_key(re.sub(r"[\s\u3000・·._\-]", "", str(term)))
+                        if len(str(term)) >= 2 and term_key not in work_actor_keys:
                             profile["semantic_terms"][str(term)] += weight * float(term_weight or 0)
                 profile["semantic_terms"] = Counter(dict(profile["semantic_terms"].most_common(2400)))
             except SQLAlchemyError:
@@ -1538,7 +1547,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         _record_filter(diagnostics, item, code, "disliked", "用户已标记不感兴趣")
         return None
     in_library = code in profile.get("codes", set()) or bool((item.get("library") or {}).get("in_library") if isinstance(item.get("library"), dict) else False)
-    actors = _unique_names(item.get("actors") or [], 12)
+    actors = _unique_names([canonical_actor_name(name) for name in (item.get("actors") or [])], 12)
     base_categories = _unique_names(item.get("categories") or [], 16)
     title_profile = _ensure_title_profile(item)
     title_traits = _title_trait_labels(title_profile, limit=10, min_weight=0.55)
