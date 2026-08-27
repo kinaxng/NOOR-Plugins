@@ -45,8 +45,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 13
-PERSONALIZED_MODEL_VERSION = "personal-v13"
+RECOMMENDATION_ALGORITHM_VERSION = 14
+PERSONALIZED_MODEL_VERSION = "personal-v14"
 STABLE_MODEL_VERSION = "stable-v1"
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
@@ -193,7 +193,7 @@ TITLE_TRAIT_PATTERNS: tuple[dict[str, Any], ...] = (
 
 def _image_candidates(*items: Any) -> list[str]:
     out: list[str] = []
-    keys = ("fanart_url", "cover_url", "thumb_url", "image", "poster_url", "jacket_url", "preview_url")
+    keys = ("fanart_url", "cover_url", "thumb_url", "image", "poster_url", "jacket_url", "preview_url", "image_candidates")
 
     def append_url(url: str) -> None:
         text = str(url or "").strip()
@@ -2291,6 +2291,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
         "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
         "recall_sources": recall_sources,
+        "portrait_completeness": dict(item.get("completeness") or item.get("portrait_completeness") or {}),
+        "portrait_sources": dict(item.get("field_sources") or item.get("portrait_sources") or {}),
         "score_breakdown": {
             "preference": round(personalized_score, 1),
             "actor_preference": round(actor_preference_score, 1),
@@ -2551,7 +2553,7 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-    """Apply confidence filtering and a small deterministic exploration slot."""
+    """Reserve deterministic, uncertainty-aware exploration without displacing the strong majority."""
     threshold = int(_config_number(config, "minimum_confidence_threshold", 0, 0, 80))
     if threshold:
         items = [item for item in items if float(item.get("confidence") or 0) >= threshold]
@@ -2576,22 +2578,34 @@ def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str
         personalized = float(item.get("personalized_score") or 0)
         actionable = float(item.get("actionability_score") or 0)
         breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
-        novelty = 4.0 if float(breakdown.get("actor_preference") or 0) <= 0 else 0.0
+        interval = item.get("confidence_interval") if isinstance(item.get("confidence_interval"), dict) else {}
+        uncertainty = max(0.0, float(interval.get("upper") or 0) - float(interval.get("lower") or 0)) / 100
+        actor_novelty = 1.0 if float(breakdown.get("actor_preference") or 0) <= 0 else 0.0
+        relation_confidence = float(item.get("neighbor_confidence") or 0)
+        release = str(item.get("release_date") or "")
+        freshness = 1.0 if release.startswith(str(dt.date.today().year)) else 0.55 if release.startswith(str(dt.date.today().year - 1)) else 0.0
+        completeness = item.get("portrait_completeness") if isinstance(item.get("portrait_completeness"), dict) else {}
+        portrait_quality = sum(bool(completeness.get(key)) for key in ("title", "cover", "actors", "categories")) / 4 if completeness else 0.5
         digest = hashlib.sha256(f"{seed}:{item.get('code') or item.get('title') or ''}".encode("utf-8")).digest()
         jitter = int.from_bytes(digest[:2], "big") / 65535 * 2
-        return personalized * 0.62 + actionable * 0.22 + novelty + jitter
+        return personalized * 0.4 + actionable * 0.18 + actor_novelty * 4 + relation_confidence * 5 + uncertainty * 3 + freshness * 3 + portrait_quality * 2 + jitter
 
     top = items[:limit]
-    eligible = [item for item in items[limit:] if float(item.get("personalized_score") or 0) >= 8]
+    eligible = [
+        item for item in items[limit:]
+        if float(item.get("personalized_score") or 0) >= 6
+        and (float(item.get("neighbor_confidence") or 0) >= 0.35 or float(item.get("actionability_score") or 0) >= 5)
+    ]
     pool = sorted(eligible or items[limit:], key=exploration_value, reverse=True)
     picks = pool[:exploration_count]
     step = max(1, round(limit / (len(picks) + 1)))
     position = step
     for pick in picks:
         pick["is_exploration"] = True
+        pick["exploration_kind"] = "uncertainty-aware"
         reasons = pick.get("reasons") if isinstance(pick.get("reasons"), list) else []
-        if "探索位：相邻偏好" not in reasons:
-            reasons.append("探索位：相邻偏好")
+        if "探索位：可信的新方向" not in reasons:
+            reasons.append("探索位：可信的新方向")
         pick["reasons"] = reasons
         if position < len(top):
             top[position] = pick
@@ -2732,7 +2746,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 existing["neighbor_confidence"] = neighbor.get("neighbor_confidence")
                 existing["neighbor_evidence"] = neighbor.get("neighbor_evidence") or []
                 existing["recall_sources"] = list(dict.fromkeys([*(existing.get("recall_sources") or []), "core-neighbor"]))
-                for key in ("actors", "categories", "maker", "series", "director", "cover_url", "release_date"):
+                for key in ("actors", "categories", "maker", "series", "director", "cover_url", "image_candidates", "release_date", "field_sources", "completeness"):
                     if not existing.get(key) and neighbor.get(key):
                         existing[key] = neighbor[key]
                 tags = list(existing.get("source_tags") or [])
@@ -2773,6 +2787,10 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     scored.sort(key=lambda x: (x["score"], (x.get("resource_summary") or {}).get("total") or 0, x.get("magnets_count") or 0, x.get("release_date") or ""), reverse=True)
     scored = _diversify_recommendations(scored)
     controls_config = dict(config)
+    if config.get("adaptive_exploration_enabled", True):
+        mature_route_samples = int(route_evaluation.get("eligible") or 0)
+        adaptive_ratio = 0.08 if media_count >= 100 and mature_route_samples >= 30 else 0.1 if media_count >= 30 else 0.14
+        controls_config["exploration_ratio"] = max(float(config.get("exploration_ratio") or 0), adaptive_ratio)
     if cold_start_strength > 0:
         controls_config["exploration_ratio"] = max(float(config.get("exploration_ratio") or 0), 0.1 + cold_start_strength * 0.1)
     scored = _apply_recommendation_controls(scored, controls_config, requested_limit)
@@ -2815,6 +2833,11 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "cold_start": {"active": cold_start_strength > 0, "strength": round(cold_start_strength, 3), "threshold": cold_start_threshold},
             "model_evaluation": _model_evaluation(store),
             "route_evaluation": route_evaluation,
+            "exploration": {
+                "adaptive": bool(config.get("adaptive_exploration_enabled", True)),
+                "ratio": round(float(controls_config.get("exploration_ratio") or 0), 3),
+                "selected": sum(1 for item in scored if item.get("is_exploration")),
+            },
             "neighbor_recall": {
                 "seeds": int(similarity_meta.get("seed_count") or 0),
                 "candidates": len(similarity_meta.get("items") or []),
