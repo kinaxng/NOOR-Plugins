@@ -2753,7 +2753,10 @@ async def _merge_cached_resource_intelligence(result: dict[str, Any]) -> dict[st
         return result
     try:
         from app.knowledge.intelligence import cached_resource_summary_map
-        summaries = await cached_resource_summary_map([str(item.get("code") or "") for item in items if isinstance(item, dict)])
+        summaries = await asyncio.wait_for(
+            cached_resource_summary_map([str(item.get("code") or "") for item in items if isinstance(item, dict)]),
+            timeout=0.25,
+        )
     except Exception:
         return result
     for item in items:
