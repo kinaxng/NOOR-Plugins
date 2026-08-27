@@ -799,8 +799,9 @@ def _profile_title_term_matches(item: Any, profile_terms: Counter, limit: int = 
     return matches[:limit]
 
 
-def _semantic_profile_matches(item: Any, profile_terms: Counter, media_count: int, limit: int = 8) -> list[dict[str, Any]]:
+def _semantic_profile_matches(item: Any, profile_terms: Counter, media_count: int, limit: int = 8, excluded_names: set[str] | None = None) -> list[dict[str, Any]]:
     weighted = semantic_tokens(_title_text(item)).get("weighted") or {}
+    excluded_names = excluded_names or set()
     matches = [
         {
             "name": str(term),
@@ -809,7 +810,7 @@ def _semantic_profile_matches(item: Any, profile_terms: Counter, media_count: in
             "relevance": math.log2(float(profile_terms.get(term) or 0) + 1) * max(0.08, math.log((media_count + 1) / (float(profile_terms.get(term) or 0) + 1))) * float(weight or 0),
         }
         for term, weight in weighted.items()
-        if len(str(term)) >= 2 and float(profile_terms.get(term) or 0) > 0
+        if len(str(term)) >= 2 and float(profile_terms.get(term) or 0) > 0 and not _is_actor_name_term(str(term), excluded_names)
     ]
     matches = [row for row in matches if float(row["count"]) / max(media_count, 1) < 0.48]
     matches.sort(key=lambda row: (float(row["relevance"]), len(str(row["name"]))), reverse=True)
@@ -830,6 +831,18 @@ def _is_actor_name_term(term: str, actor_names: set[str]) -> bool:
         normalized and actor_key and (normalized == actor_key or normalized in actor_key or actor_key in normalized)
         for actor_key in (_norm_key(actor) for actor in actor_names)
     )
+
+
+def _work_profile_actor_names(work: WorkProfile) -> set[str]:
+    names: set[str] = set()
+    for facts in (work.facts or {}).values():
+        if not isinstance(facts, dict):
+            continue
+        for actor in facts.get("actors") or facts.get("actresses") or []:
+            name = actor.get("name") if isinstance(actor, dict) else actor
+            if str(name or "").strip():
+                names.add(str(name).strip())
+    return names
 
 
 def _prune_title_term_counter(counter: Counter) -> Counter:
@@ -1053,6 +1066,12 @@ async def _library_profile() -> dict[str, Any]:
                 for category in rels["categories"]:
                     profile["actor_category"][(actor, category)] += weight
         actor_names = {str(name) for name in profile["actors"] if str(name or "").strip()}
+        semantic_actor_names = set(actor_names)
+        try:
+            actor_rows = await db.execute(select(KnowledgeEntity.label).where(KnowledgeEntity.entity_type == "actor"))
+            semantic_actor_names.update(str(name).strip() for name in actor_rows.scalars() if str(name or "").strip())
+        except SQLAlchemyError:
+            pass
         signature = _title_profile_signature(media, media_weights)
         title_profile = _load_title_profile_cache(signature)
         if title_profile is None:
@@ -1065,9 +1084,10 @@ async def _library_profile() -> dict[str, Any]:
                 work_rows = await db.execute(select(WorkProfile).where(WorkProfile.code.in_(semantic_work_weights)))
                 for work in work_rows.scalars().all():
                     weight = semantic_work_weights.get(work.code, 1.0)
+                    work_actor_names = semantic_actor_names | _work_profile_actor_names(work)
                     weighted_terms = (work.tokens or {}).get("weighted") if isinstance(work.tokens, dict) else {}
                     for term, term_weight in (weighted_terms or {}).items():
-                        if len(str(term)) >= 2:
+                        if len(str(term)) >= 2 and not _is_actor_name_term(str(term), work_actor_names):
                             profile["semantic_terms"][str(term)] += weight * float(term_weight or 0)
                 profile["semantic_terms"] = Counter(dict(profile["semantic_terms"].most_common(2400)))
             except SQLAlchemyError:
@@ -1609,7 +1629,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         category_preference_score += boost
         reasons.append("标题题材：" + "/".join(name for name, _ in sorted_traits[:3]))
 
-    semantic_hits = _semantic_profile_matches(item, semantic_term_counter, media_count, 8)
+    semantic_hits = _semantic_profile_matches(item, semantic_term_counter, media_count, 8, set(actors))
     if semantic_hits:
         top_relevance = float(semantic_hits[0]["relevance"])
         second_relevance = float(semantic_hits[1]["relevance"]) if len(semantic_hits) > 1 else 0.0
