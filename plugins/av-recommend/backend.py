@@ -45,8 +45,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 12
-PERSONALIZED_MODEL_VERSION = "personal-v12"
+RECOMMENDATION_ALGORITHM_VERSION = 13
+PERSONALIZED_MODEL_VERSION = "personal-v13"
 STABLE_MODEL_VERSION = "stable-v1"
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
@@ -56,6 +56,10 @@ _recommendation_generation_lock = asyncio.Lock()
 _scheduler_task: asyncio.Task[None] | None = None
 _scheduler_stop: asyncio.Event | None = None
 _prewarm_state: dict[str, Any] = {"status": "idle", "last_started_at": None, "last_finished_at": None, "last_error": "", "modes": []}
+_profile_enrichment_task: asyncio.Task[None] | None = None
+_profile_enrichment_pending: dict[str, dict[str, Any]] = {}
+_profile_enrichment_attempts: dict[str, float] = {}
+_profile_enrichment_state: dict[str, Any] = {"status": "idle", "queued": 0, "enriched": 0, "failed": 0, "last_finished_at": None, "last_error": ""}
 
 
 def _recommendation_cache_id(cache_key: str) -> str:
@@ -364,6 +368,101 @@ def _backfill_candidate_pool_title_profiles(pool: dict[str, Any]) -> int:
     return changed
 
 
+def _candidate_profile_gaps(item: dict[str, Any]) -> list[str]:
+    gaps = []
+    if not str(item.get("cover_url") or item.get("thumb_url") or "").strip():
+        gaps.append("cover")
+    if not (item.get("actors") or []):
+        gaps.append("actors")
+    if not (item.get("categories") or []):
+        gaps.append("categories")
+    title = str(item.get("title") or item.get("display_title") or "").strip()
+    if not title or title == _candidate_code(item):
+        gaps.append("title")
+    return gaps
+
+
+async def _run_profile_enrichment(config: dict[str, Any]) -> None:
+    global _profile_enrichment_task
+    from app.plugins.runtime import runtime
+
+    enriched = failed = 0
+    _profile_enrichment_state.update({"status": "running", "last_error": ""})
+    try:
+        while _profile_enrichment_pending:
+            batch_codes = list(_profile_enrichment_pending)[:12]
+            for code in batch_codes:
+                _profile_enrichment_pending.pop(code, None)
+            _profile_enrichment_state["queued"] = len(_profile_enrichment_pending)
+            semaphore = asyncio.Semaphore(3)
+
+            async def load(code: str) -> tuple[str, dict[str, Any] | None, str]:
+                _profile_enrichment_attempts[code] = time.time()
+                try:
+                    async with semaphore:
+                        result = await asyncio.wait_for(runtime.handle_action("javdb", "video", {"code": code}), timeout=12)
+                    data = result.get("data") if isinstance(result, dict) and isinstance(result.get("data"), dict) else result
+                    return code, data if isinstance(data, dict) else None, ""
+                except Exception as exc:
+                    return code, None, str(exc)[:300]
+
+            loaded = await asyncio.gather(*(load(code) for code in batch_codes))
+            async with _pool_lock:
+                pool = _pool()
+                items = pool.get("items") if isinstance(pool.get("items"), dict) else {}
+                for code, data, error in loaded:
+                    item = items.get(code) if isinstance(items.get(code), dict) else {"code": code, "number": code}
+                    item["profile_enrichment_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+                    if not data:
+                        item["profile_enrichment_error"] = error or "未返回作品详情"
+                        failed += 1
+                    else:
+                        item = _merge_candidate(item, data, "core-profile", "Core 画像补全")
+                        item["detail"] = data
+                        item["actors"] = _names(data.get("actors")) or item.get("actors") or []
+                        item["categories"] = _names(data.get("categories")) or item.get("categories") or []
+                        item["cover_url"] = data.get("cover_url") or data.get("thumb_url") or item.get("cover_url") or ""
+                        item["fanart_url"] = data.get("fanart_url") or data.get("cover_url") or item.get("fanart_url") or ""
+                        item["profile_enrichment_error"] = ""
+                        enriched += 1
+                    items[code] = item
+                pool["items"] = items
+                _save_pool(pool)
+        if enriched:
+            from app.knowledge.intelligence import build_work_similarity_index
+            await build_work_similarity_index(force=True)
+            _invalidate_recommendation_cache()
+            await _prewarm_recommendations(config, force=True, include_full=False)
+        _profile_enrichment_state.update({"status": "idle", "enriched": enriched, "failed": failed, "last_finished_at": dt.datetime.now(dt.timezone.utc).isoformat()})
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _profile_enrichment_state.update({"status": "failed", "last_error": str(exc)[:500], "last_finished_at": dt.datetime.now(dt.timezone.utc).isoformat()})
+    finally:
+        _profile_enrichment_task = None
+        if _profile_enrichment_pending and not (_scheduler_stop and _scheduler_stop.is_set()):
+            _profile_enrichment_task = asyncio.create_task(_run_profile_enrichment(dict(config)))
+
+
+def _queue_profile_enrichment(config: dict[str, Any], items: list[dict[str, Any]]) -> int:
+    global _profile_enrichment_task
+    now = time.time()
+    accepted = 0
+    for item in items:
+        code = _candidate_code(item)
+        if not code or not _candidate_profile_gaps(item) or now - float(_profile_enrichment_attempts.get(code) or 0) < 6 * 3600:
+            continue
+        if code not in _profile_enrichment_pending:
+            _profile_enrichment_pending[code] = {"gaps": _candidate_profile_gaps(item), "queued_at": now}
+            accepted += 1
+        if len(_profile_enrichment_pending) >= 48:
+            break
+    _profile_enrichment_state["queued"] = len(_profile_enrichment_pending)
+    if _profile_enrichment_pending and (_profile_enrichment_task is None or _profile_enrichment_task.done()):
+        _profile_enrichment_task = asyncio.create_task(_run_profile_enrichment(dict(config)))
+    return accepted
+
+
 def _subscription_codes() -> set[str]:
     try:
         data = json.loads(_subscription_path().read_text(encoding="utf-8"))
@@ -645,6 +744,7 @@ def _mark_exposure_converted(store: dict[str, Any], code: Any, event_type: str =
     row["conversion_event"] = str(event_type or "interaction")[:64]
     row["converted_model"] = str(row.get("last_model") or "unknown")
     row["converted_rank"] = int(row.get("last_rank") or 0)
+    row["converted_routes"] = list(row.get("last_routes") or [])
     return True
 
 
@@ -673,6 +773,18 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
             "actors": [str(value).strip() for value in (item.get("actors") or []) if str(value or "").strip()][:8],
             "categories": [str(value).strip() for value in (item.get("categories") or []) if str(value or "").strip()][:12],
         })
+        routes = [str(value).strip()[:64] for value in (item.get("recall_sources") or []) if str(value or "").strip()]
+        route_evidence = row.setdefault("routes", {})
+        for route in dict.fromkeys(routes):
+            evidence = route_evidence.get(route) if isinstance(route_evidence.get(route), dict) else {}
+            evidence.update({
+                "batch_count": int(evidence.get("batch_count") or 0) + 1,
+                "first_seen_at": int(evidence.get("first_seen_at") or now),
+                "last_seen_at": now,
+                "last_rank": max(0, int(item.get("rank") or 0)),
+            })
+            route_evidence[route] = evidence
+        row["last_routes"] = list(dict.fromkeys(routes))
         model_version = str(item.get("model_version") or "unknown")[:64]
         rank = max(0, int(item.get("rank") or 0))
         score_value = float(item.get("score") or 0)
@@ -740,6 +852,48 @@ def _model_evaluation(store: dict[str, Any]) -> dict[str, Any]:
             "mrr": round(float(metric.pop("reciprocal_rank_sum")) / max(converted, 1), 4),
         })
     return {"models": models, "minimum_comparison_sample": 30, "generated_at": _now_ms()}
+
+
+def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    """Estimate route value from converted or mature exposure cohorts."""
+    now_ms = int(now_ms or _now_ms())
+    mature_age_ms = 7 * 86400 * 1000
+    routes: dict[str, dict[str, Any]] = {}
+    eligible_rows = 0
+    converted_rows = 0
+    for row in (store.get("exposures") or {}).values():
+        if not isinstance(row, dict):
+            continue
+        converted = bool(row.get("converted_at"))
+        mature = now_ms - int(row.get("first_seen_at") or now_ms) >= mature_age_ms
+        if not converted and not mature:
+            continue
+        eligible_rows += 1
+        converted_rows += int(converted)
+        converted_routes = set(row.get("converted_routes") or row.get("last_routes") or []) if converted else set()
+        for route, evidence in (row.get("routes") or {}).items():
+            if not isinstance(evidence, dict):
+                continue
+            metric = routes.setdefault(str(route), {"exposed": 0, "impressions": 0, "converted": 0})
+            metric["exposed"] += 1
+            metric["impressions"] += int(evidence.get("batch_count") or 0)
+            metric["converted"] += int(converted and route in converted_routes)
+    global_rate = (converted_rows + 2) / (eligible_rows + 10)
+    for metric in routes.values():
+        exposed = int(metric["exposed"])
+        converted = int(metric["converted"])
+        posterior = (converted + 2) / (exposed + 10)
+        reliability = exposed / (exposed + 20)
+        factor = max(0.8, min(1.2, 1 + (posterior - global_rate) * 1.5 * reliability))
+        lower, upper = _wilson_interval(converted, exposed)
+        metric.update({
+            "conversion_rate": round(converted / max(exposed, 1), 4),
+            "posterior_rate": round(posterior, 4),
+            "conversion_interval": {"lower": round(lower, 4), "upper": round(upper, 4)},
+            "reliability": round(reliability, 3),
+            "weight": round(factor, 3),
+        })
+    return {"routes": routes, "eligible": eligible_rows, "converted": converted_rows, "prior": {"alpha": 2, "beta": 8}, "generated_at": now_ms}
 
 
 def _select_ranking_model(config: dict[str, Any], store: dict[str, Any]) -> dict[str, str]:
@@ -1653,7 +1807,7 @@ async def start_background(_config: dict[str, Any] | None = None) -> None:
 
 
 async def stop_background() -> None:
-    global _scheduler_task, _scheduler_stop
+    global _scheduler_task, _scheduler_stop, _profile_enrichment_task
     if _scheduler_stop:
         _scheduler_stop.set()
     if _scheduler_task:
@@ -1661,6 +1815,11 @@ async def stop_background() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await _scheduler_task
     _scheduler_task = None
+    if _profile_enrichment_task:
+        _profile_enrichment_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _profile_enrichment_task
+    _profile_enrichment_task = None
     _scheduler_stop = None
 
 
@@ -1711,6 +1870,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     behavior_actors: Counter = feedback.get("behavior_actors") or Counter()
     behavior_categories: Counter = feedback.get("behavior_categories") or Counter()
     outcome_model: dict[str, Any] = feedback.get("outcome_model") or {}
+    route_weights: dict[str, float] = feedback.get("route_weights") or {}
     exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
@@ -1743,6 +1903,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     quality_score = 0.0
     penalty_score = 0.0
     outcome_calibration_score = 0.0
+    route_calibration_score = 0.0
     passive_exposure_penalty = float(exposure_penalties.get(code) or 0)
     if passive_exposure_penalty > 0:
         score -= passive_exposure_penalty
@@ -2009,7 +2170,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         reasons.append("近期查看意向")
     neighbor_score = float(item.get("neighbor_score") or 0)
     if neighbor_score > 0:
-        boost = min(14, math.log2(1 + neighbor_score) * 5.2)
+        route_factor = float(route_weights.get("core-neighbor") or 1.0)
+        boost = min(14, math.log2(1 + neighbor_score) * 5.2 * route_factor)
         score += boost
         personalized_score += boost
         relationship_preference_score += boost
@@ -2021,6 +2183,16 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
                 if label and label not in labels:
                     labels.append(label)
         reasons.insert(min(2, len(reasons)), "邻域相似" + ("：" + "/".join(labels[:3]) if labels else ""))
+    recall_sources = list(item.get("recall_sources") or [])
+    learned_route_weights = [float(route_weights.get(route) or 1.0) for route in recall_sources if route in route_weights]
+    if learned_route_weights:
+        route_calibration_score = max(-2.0, min(2.0, (sum(learned_route_weights) / len(learned_route_weights) - 1) * 8))
+        score += route_calibration_score
+        personalized_score += route_calibration_score
+        if route_calibration_score >= 0.8:
+            reasons.append("召回路线转化较好")
+        elif route_calibration_score <= -0.8:
+            reasons.append("召回路线谨慎降权")
     release = str(item.get("release_date") or item.get("date") or "")
     if release.startswith("2026"):
         score += 4
@@ -2114,10 +2286,11 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "confidence": confidence,
         "confidence_interval": {"lower": max(0, confidence - uncertainty_radius), "upper": min(100, confidence + uncertainty_radius), "reliability": round(evidence_reliability, 3)},
         "outcome_calibration": round(outcome_calibration_score, 1),
+        "route_calibration": round(route_calibration_score, 1),
         "neighbor_score": round(neighbor_score, 3),
         "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
         "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
-        "recall_sources": list(item.get("recall_sources") or []),
+        "recall_sources": recall_sources,
         "score_breakdown": {
             "preference": round(personalized_score, 1),
             "actor_preference": round(actor_preference_score, 1),
@@ -2126,6 +2299,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "semantic_preference": round(semantic_preference_score, 1),
             "feedback": round(feedback_score, 1),
             "outcomes": round(outcome_calibration_score, 1),
+            "recall_route": round(route_calibration_score, 1),
             "resources": round(actionability_score, 1),
             "quality": round(quality_score, 1),
             "penalty": round(penalty_score, 1),
@@ -2434,6 +2608,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     store = _ensure_store()
     model_selection = _select_ranking_model(config, store)
     behavior = await preference_behavior_summary()
+    route_evaluation = _route_evaluation(store)
     feedback = {
         "ignored_codes": _feedback_codes(store.get("ignored")),
         "liked_codes": _feedback_codes(store.get("liked")),
@@ -2446,6 +2621,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "behavior_actors": Counter(behavior.get("actor_identities") or behavior.get("actors") or {}),
         "behavior_categories": Counter(behavior.get("categories") or {}),
         "outcome_model": behavior.get("outcomes") or {},
+        "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
         "exposure_penalties": _exposure_penalties(store),
     }
     requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
@@ -2469,6 +2645,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "disliked_actors": dict(feedback["disliked_actors"]),
         "disliked_categories": dict(feedback["disliked_categories"]),
         "exposure_penalties": feedback["exposure_penalties"],
+        "route_weights": feedback["route_weights"],
         "source_mode": source_mode,
         "requested_limit": requested_limit,
     }, sort_keys=True, ensure_ascii=False)
@@ -2497,6 +2674,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "disliked_actors": dict(feedback["disliked_actors"]),
         "disliked_categories": dict(feedback["disliked_categories"]),
         "exposure_penalties": feedback["exposure_penalties"],
+        "route_weights": feedback["route_weights"],
         "library_codes": sorted(live_codes),
         "library_code_count": len(profile.get("codes") or []),
         "library_code_fingerprint": _code_fingerprint(profile.get("codes") or set()),
@@ -2561,6 +2739,8 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 if not any(str(tag.get("id") or "") == "intelligence-neighbor" for tag in tags if isinstance(tag, dict)):
                     tags.append({"id": "intelligence-neighbor", "label": "Core 邻域"})
                 existing["source_tags"] = tags
+        similarity_meta["profile_gaps"] = Counter(gap for neighbor in (similarity_meta.get("items") or []) for gap in _candidate_profile_gaps(neighbor))
+        similarity_meta["profile_enrichment_queued"] = _queue_profile_enrichment(config, [neighbor for neighbor in (similarity_meta.get("items") or []) if _candidate_profile_gaps(neighbor)])
     except Exception as exc:
         warnings.append(f"Core 邻域召回暂不可用：{exc}")
 
@@ -2634,6 +2814,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "disliked": len([x for x in feedback["disliked_codes"] if x]),
             "cold_start": {"active": cold_start_strength > 0, "strength": round(cold_start_strength, 3), "threshold": cold_start_threshold},
             "model_evaluation": _model_evaluation(store),
+            "route_evaluation": route_evaluation,
             "neighbor_recall": {
                 "seeds": int(similarity_meta.get("seed_count") or 0),
                 "candidates": len(similarity_meta.get("items") or []),
@@ -2643,6 +2824,8 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "core_only_selected": sum(1 for item in scored if (item.get("recall_sources") or []) == ["core-neighbor"]),
                 "feed_overlap_selected": sum(1 for item in scored if "core-neighbor" in (item.get("recall_sources") or []) and base_recall_source in (item.get("recall_sources") or [])),
                 "average_confidence": round(sum(float(item.get("neighbor_confidence") or 0) for item in scored if float(item.get("neighbor_score") or 0) > 0) / max(1, sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0)), 3),
+                "profile_gaps": dict(similarity_meta.get("profile_gaps") or {}),
+                "profile_enrichment_queued": int(similarity_meta.get("profile_enrichment_queued") or 0),
             },
         },
         "candidate_meta": {"pool": _candidate_pool_stats(pool)},
@@ -2714,7 +2897,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
     if action == "refresh_cover":
         return await _refresh_candidate_cover(payload.get("code") or payload.get("number"))
     if action == "candidate_pool":
-        return {"ok": True, "pool": _candidate_pool_stats(_pool())}
+        return {"ok": True, "pool": _candidate_pool_stats(_pool()), "profile_enrichment": dict(_profile_enrichment_state)}
     if action == "feedback":
         code = _norm_code(payload.get("code"))
         kind = str(payload.get("kind") or "ignore").strip()
@@ -2762,7 +2945,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         return {"ok": True, "recorded": recorded}
     if action == "model_evaluation":
         data = _ensure_store()
-        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data)}
+        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data), "route_evaluation": _route_evaluation(data)}
     if action == "model_policy":
         policy = str(payload.get("policy") or "auto").strip().lower()
         if policy not in {"auto", "personal", "stable"}:

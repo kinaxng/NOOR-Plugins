@@ -369,6 +369,7 @@ export async function mount(root, sdk) {
           rank: item.recommendation_rank || 0,
           score: item.score || 0,
           model_version: item.model_version || state.data?.model?.version || 'unknown',
+          recall_sources: item.recall_sources || [],
         })),
       },
     }).catch(() => {})
