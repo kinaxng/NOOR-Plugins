@@ -20,7 +20,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity
+from app.knowledge.intelligence import semantic_tokens
+from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
 PLUGIN_ID = "av-recommend"
@@ -798,6 +799,31 @@ def _profile_title_term_matches(item: Any, profile_terms: Counter, limit: int = 
     return matches[:limit]
 
 
+def _semantic_profile_matches(item: Any, profile_terms: Counter, media_count: int, limit: int = 8) -> list[dict[str, Any]]:
+    weighted = semantic_tokens(_title_text(item)).get("weighted") or {}
+    matches = [
+        {
+            "name": str(term),
+            "count": float(profile_terms.get(term) or 0),
+            "weight": float(weight or 0),
+            "relevance": math.log2(float(profile_terms.get(term) or 0) + 1) * max(0.08, math.log((media_count + 1) / (float(profile_terms.get(term) or 0) + 1))) * float(weight or 0),
+        }
+        for term, weight in weighted.items()
+        if len(str(term)) >= 2 and float(profile_terms.get(term) or 0) > 0
+    ]
+    matches = [row for row in matches if float(row["count"]) / max(media_count, 1) < 0.48]
+    matches.sort(key=lambda row: (float(row["relevance"]), len(str(row["name"]))), reverse=True)
+    selected: list[dict[str, Any]] = []
+    for match in matches:
+        name = str(match["name"])
+        if any(name in str(row["name"]) or str(row["name"]) in name for row in selected):
+            continue
+        selected.append(match)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def _is_actor_name_term(term: str, actor_names: set[str]) -> bool:
     normalized = _norm_key(term)
     return any(
@@ -947,6 +973,7 @@ async def _library_profile() -> dict[str, Any]:
         "directors": Counter(),
         "title_traits": Counter(),
         "title_terms": Counter(),
+        "semantic_terms": Counter(),
         "actor_category": Counter(),
         "local_features": {},
         "top_media": [],
@@ -973,6 +1000,7 @@ async def _library_profile() -> dict[str, Any]:
             "directors": Counter(),
             "title_traits": Counter(),
             "title_terms": Counter(),
+            "semantic_terms": Counter(),
             "actor_category": Counter(),
             "local_features": {},
             "top_media": [_entity_payload(item) for item in media[:8]],
@@ -994,6 +1022,7 @@ async def _library_profile() -> dict[str, Any]:
             "categories": set(),
             "studios": set(),
         })
+        semantic_work_weights: dict[str, float] = {}
         for edge, target in rows.all():
             rel = edge.relation_type
             if rel == "HAS_CODE":
@@ -1001,6 +1030,7 @@ async def _library_profile() -> dict[str, Any]:
                 if code:
                     profile["codes"].add(code)
                     profile["media_by_code"][code] = _entity_payload(media_by_id.get(edge.source_entity_id)) if media_by_id.get(edge.source_entity_id) else None
+                    semantic_work_weights[code] = max(semantic_work_weights.get(code, 0), media_weights.get(edge.source_entity_id, 1.0))
             elif rel == "HAS_ACTOR":
                 profile["actors"][target.label] += media_weights.get(edge.source_entity_id, 1.0)
                 relations_by_media[edge.source_entity_id]["actors"].add(target.label)
@@ -1031,6 +1061,18 @@ async def _library_profile() -> dict[str, Any]:
                 _save_title_profile_cache(signature, title_profile["title_traits"], title_profile["title_terms"], len(media))
         profile["title_traits"] = title_profile["title_traits"]
         profile["title_terms"] = title_profile["title_terms"]
+        if semantic_work_weights:
+            try:
+                work_rows = await db.execute(select(WorkProfile).where(WorkProfile.code.in_(semantic_work_weights)))
+                for work in work_rows.scalars().all():
+                    weight = semantic_work_weights.get(work.code, 1.0)
+                    weighted_terms = (work.tokens or {}).get("weighted") if isinstance(work.tokens, dict) else {}
+                    for term, term_weight in (weighted_terms or {}).items():
+                        if len(str(term)) >= 2:
+                            profile["semantic_terms"][str(term)] += weight * float(term_weight or 0)
+                profile["semantic_terms"] = Counter(dict(profile["semantic_terms"].most_common(2400)))
+            except SQLAlchemyError:
+                pass
         for item in media:
             data = item.data or {}
             code = _norm_code(json.dumps(data, ensure_ascii=False) + " " + item.label)
@@ -1485,6 +1527,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     actor_preference_score = 0.0
     category_preference_score = 0.0
     relationship_preference_score = 0.0
+    semantic_preference_score = 0.0
     feedback_score = 0.0
     actionability_score = 0.0
     quality_score = 0.0
@@ -1498,6 +1541,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     director_counter: Counter = profile.get("directors") or Counter()
     title_trait_counter: Counter = profile.get("title_traits") or Counter()
     title_term_counter: Counter = profile.get("title_terms") or Counter()
+    semantic_term_counter: Counter = profile.get("semantic_terms") or Counter()
     actor_category_counter: Counter = profile.get("actor_category") or Counter()
     media_count = max(int(profile.get("media_count") or 0), 1)
 
@@ -1570,6 +1614,17 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             personalized_score += boost
             category_preference_score += boost
             reasons.append("媒体库标题词：" + "/".join(str(hit.get("name") or "") for hit in mined_term_hits[:3] if hit.get("name")))
+
+    semantic_hits = _semantic_profile_matches(item, semantic_term_counter, media_count, 8)
+    if semantic_hits:
+        top_relevance = float(semantic_hits[0]["relevance"])
+        second_relevance = float(semantic_hits[1]["relevance"]) if len(semantic_hits) > 1 else 0.0
+        boost = min(7, max(0, top_relevance - 15) * 0.3 + max(0, second_relevance - 18) * 0.12)
+        if boost >= 1.2:
+            score += boost
+            personalized_score += boost
+            semantic_preference_score += boost
+            reasons.append("语义画像：" + "/".join(str(hit["name"]) for hit in semantic_hits[:3]))
 
     feedback_category_boost = 0.0
     feedback_category_penalty = 0.0
@@ -1756,6 +1811,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "actor_preference": round(actor_preference_score, 1),
             "category_preference": round(category_preference_score, 1),
             "relationship_preference": round(relationship_preference_score, 1),
+            "semantic_preference": round(semantic_preference_score, 1),
             "feedback": round(feedback_score, 1),
             "resources": round(actionability_score, 1),
             "quality": round(quality_score, 1),
