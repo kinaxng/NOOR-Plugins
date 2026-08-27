@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -64,6 +65,7 @@ _CACHE: dict[str, Any] = {"entries": {}}
 _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
 _pool_lock = asyncio.Lock()
 _recommendation_generation_locks = {"latest": asyncio.Lock(), "full": asyncio.Lock()}
+_recommendation_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
 _scheduler_task: asyncio.Task[None] | None = None
 _scheduler_stop: asyncio.Event | None = None
 _prewarm_state: dict[str, Any] = {"status": "idle", "last_started_at": None, "last_finished_at": None, "last_error": "", "modes": []}
@@ -91,7 +93,7 @@ def _load_recommendation_cache() -> dict[str, Any]:
     return {"version": 1, "entries": {}}
 
 
-def _recommendation_cache_get(cache_key: str, ttl_seconds: int = DEFAULT_CACHE_TTL) -> dict[str, Any] | None:
+def _recommendation_cache_get(cache_key: str, ttl_seconds: int = DEFAULT_CACHE_TTL, *, allow_stale: bool = False, annotate: bool = False, max_stale_seconds: int = 21600) -> dict[str, Any] | None:
     cache_id = _recommendation_cache_id(cache_key)
     entries = _CACHE.setdefault("entries", {})
     entry = entries.get(cache_id)
@@ -101,18 +103,25 @@ def _recommendation_cache_get(cache_key: str, ttl_seconds: int = DEFAULT_CACHE_T
             entries[cache_id] = entry
     if not isinstance(entry, dict):
         return None
-    if time.time() - float(entry.get("ts") or 0) >= ttl_seconds:
-        entries.pop(cache_id, None)
+    age_seconds = max(0.0, time.time() - float(entry.get("ts") or 0))
+    invalidated = bool(entry.get("invalidated_at"))
+    stale = invalidated or age_seconds >= ttl_seconds
+    if stale and (not allow_stale or age_seconds >= ttl_seconds + max_stale_seconds):
         return None
     value = entry.get("value")
-    return value if isinstance(value, dict) else None
+    if not isinstance(value, dict):
+        return None
+    result = copy.deepcopy(value)
+    if annotate:
+        result["cache_status"] = {"status": "stale" if stale else "fresh", "age_seconds": round(age_seconds, 1), "refreshing": False}
+    return result
 
 
-def _recommendation_cache_put(cache_key: str, value: dict[str, Any]) -> None:
+def _recommendation_cache_put(cache_key: str, value: dict[str, Any], *, source_mode: str = "") -> None:
     cache_id = _recommendation_cache_id(cache_key)
     data = _load_recommendation_cache()
     entries = data.setdefault("entries", {})
-    entries[cache_id] = {"ts": time.time(), "value": value}
+    entries[cache_id] = {"ts": time.time(), "value": value, "source_mode": source_mode}
     data["entries"] = dict(
         sorted(entries.items(), key=lambda item: float((item[1] or {}).get("ts") or 0), reverse=True)[:8]
     )
@@ -124,10 +133,32 @@ def _recommendation_cache_put(cache_key: str, value: dict[str, Any]) -> None:
     _CACHE["entries"] = dict(data["entries"])
 
 
-def _invalidate_recommendation_cache() -> None:
-    _CACHE["entries"] = {}
-    with contextlib.suppress(OSError):
-        _recommendation_cache_file().unlink()
+def _invalidate_recommendation_cache(*, modes: set[str] | None = None, hard: bool = True, reason: str = "changed") -> None:
+    data = _load_recommendation_cache()
+    entries = data.get("entries") if isinstance(data.get("entries"), dict) else {}
+    now = time.time()
+    retained: dict[str, Any] = {}
+    for cache_id, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        mode = str(entry.get("source_mode") or "")
+        targeted = not modes or not mode or mode in modes
+        if targeted and hard:
+            continue
+        if targeted:
+            entry = {**entry, "invalidated_at": now, "stale_reason": reason}
+        retained[cache_id] = entry
+    data["entries"] = retained
+    _CACHE["entries"] = dict(retained)
+    path = _recommendation_cache_file()
+    if not retained:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
 
 CODE_RE = re.compile(r"\b(FC2[-_ ]?(?:PPV[-_ ]?)?\d{4,9}|[A-Z]{2,8}[-_ ]?\d{2,7}|\d{6}[-_]\d{2,5})\b", re.I)
 GENERIC_CATEGORY_KEYWORDS = (
@@ -443,7 +474,7 @@ async def _run_profile_enrichment(config: dict[str, Any]) -> None:
         if enriched:
             from app.knowledge.intelligence import build_work_similarity_index
             await build_work_similarity_index(force=True)
-            _invalidate_recommendation_cache()
+            _invalidate_recommendation_cache(hard=False, reason="profile-enrichment")
             await _prewarm_recommendations(config, force=True, include_full=False)
         _profile_enrichment_state.update({"status": "idle", "enriched": enriched, "failed": failed, "last_finished_at": dt.datetime.now(dt.timezone.utc).isoformat()})
     except asyncio.CancelledError:
@@ -1427,7 +1458,7 @@ def _schedule_title_profile_refresh(signature: str, media: list[KnowledgeEntity]
         try:
             rebuilt = await asyncio.to_thread(_build_title_profile, list(media), dict(media_weights), set(actor_names))
             _save_title_profile_cache(signature, rebuilt["title_traits"], rebuilt["title_terms"], len(media))
-            _invalidate_recommendation_cache()
+            _invalidate_recommendation_cache(hard=False, reason="title-profile-refresh")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1881,7 +1912,7 @@ async def _scan_candidate_pool(config: dict[str, Any], *, force: bool = False) -
             pool["last_full_scan"] = {"at": dt.datetime.now(dt.timezone.utc).isoformat(), "pages": pages, "scanned": scanned, "added": added, "updated": updated, "detail_updated": detail_updated, "warnings": warnings[:8]}
             pool["background"] = {**(pool.get("background") or {}), "running": False, "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(), "last_error": "", "last_added": added, "last_scanned": scanned, "last_detail_updated": detail_updated}
             _save_pool(pool)
-            _invalidate_recommendation_cache()
+            _invalidate_recommendation_cache(modes={"full"}, hard=False, reason="candidate-pool-scan")
             return {"ok": True, "scanned": scanned, "added": added, "updated": updated, "detail_updated": detail_updated, "warnings": warnings, "pool": _candidate_pool_stats(pool)}
     except asyncio.CancelledError:
         raise
@@ -1928,7 +1959,7 @@ async def _refresh_candidate_cover(code_value: Any) -> dict[str, Any]:
         pool_items[code] = item
         pool["items"] = pool_items
         _save_pool(pool)
-    _invalidate_recommendation_cache()
+    _invalidate_recommendation_cache(hard=False, reason="cover-refresh")
     return {
         "ok": True,
         "code": code,
@@ -2001,6 +2032,11 @@ async def stop_background() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await _title_profile_refresh_task
     _title_profile_refresh_task = None
+    for task in list(_recommendation_refresh_tasks.values()):
+        task.cancel()
+    if _recommendation_refresh_tasks:
+        await asyncio.gather(*list(_recommendation_refresh_tasks.values()), return_exceptions=True)
+    _recommendation_refresh_tasks.clear()
     _scheduler_stop = None
 
 
@@ -2966,9 +3002,14 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "requested_limit": requested_limit,
     }, sort_keys=True, ensure_ascii=False)
     if not payload.get("refresh"):
-        cached = _recommendation_cache_get(fast_cache_key, cache_ttl)
+        cached = _recommendation_cache_get(fast_cache_key, cache_ttl, annotate=True)
         if cached is not None:
             return await _merge_cached_resource_intelligence(cached)
+        stale = _recommendation_cache_get(fast_cache_key, cache_ttl, allow_stale=True, annotate=True)
+        if stale is not None:
+            _schedule_recommendation_refresh(config, payload, fast_cache_key)
+            stale["cache_status"]["refreshing"] = True
+            return await _merge_cached_resource_intelligence(stale)
 
     profile = await _library_profile()
     cold_start_threshold = max(5, min(int(config.get("cold_start_min_library_size") or 20), 100))
@@ -2998,9 +3039,14 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "requested_limit": requested_limit,
     }, sort_keys=True, ensure_ascii=False)
     if not payload.get("refresh"):
-        cached = _recommendation_cache_get(cache_key, cache_ttl)
+        cached = _recommendation_cache_get(cache_key, cache_ttl, annotate=True)
         if cached is not None:
             return await _merge_cached_resource_intelligence(cached)
+        stale = _recommendation_cache_get(cache_key, cache_ttl, allow_stale=True, annotate=True)
+        if stale is not None:
+            _schedule_recommendation_refresh(config, payload, cache_key)
+            stale["cache_status"]["refreshing"] = True
+            return await _merge_cached_resource_intelligence(stale)
 
     pool = _pool()
     if source_mode == "full" and _backfill_candidate_pool_title_profiles(pool):
@@ -3190,10 +3236,30 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "candidate_meta": {"pool": _candidate_pool_stats(pool)},
         "filtered": _filtered_summary(filtered_diagnostics),
         "warnings": warnings,
+        "cache_status": {"status": "generated", "age_seconds": 0, "refreshing": False},
     }
-    _recommendation_cache_put(cache_key, result)
-    _recommendation_cache_put(fast_cache_key, result)
+    _recommendation_cache_put(cache_key, result, source_mode=source_mode)
+    _recommendation_cache_put(fast_cache_key, result, source_mode=source_mode)
     return result
+
+
+def _schedule_recommendation_refresh(config: dict[str, Any], payload: dict[str, Any], cache_key: str) -> None:
+    task_key = _recommendation_cache_id(cache_key)
+    current = _recommendation_refresh_tasks.get(task_key)
+    if current and not current.done():
+        return
+
+    async def refresh() -> None:
+        try:
+            await _recommendations(dict(config), {**dict(payload), "refresh": True})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        finally:
+            _recommendation_refresh_tasks.pop(task_key, None)
+
+    _recommendation_refresh_tasks[task_key] = asyncio.create_task(refresh())
 
 
 async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:

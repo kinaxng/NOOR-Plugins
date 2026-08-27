@@ -192,6 +192,7 @@ export async function mount(root, sdk) {
     resourceSync: { active: false, count: 0, updated: false },
   }
   let resourcePoll = null
+  let snapshotPoll = null
   let resourceSyncing = false
   let exposureObserver = null
   let exposureFlushTimer = null
@@ -291,6 +292,11 @@ export async function mount(root, sdk) {
     if (state.resourceSync.updated) {
       notice.className = 'av-rec-notice'
       notice.textContent = '资源情报已完成增量更新。'
+      return
+    }
+    if (state.data?.cache_status?.status === 'stale') {
+      notice.className = 'av-rec-notice is-loading'
+      notice.textContent = '正在使用已有推荐快照，后台已开始更新。'
       return
     }
     const warnings = (state.data?.warnings || []).filter(value => !/^正在后台补全\s*\d+/.test(String(value || '')))
@@ -945,6 +951,13 @@ export async function mount(root, sdk) {
     resourcePoll = null
   }
 
+  function scheduleSnapshotPoll() {
+    if (snapshotPoll?.clear) snapshotPoll.clear()
+    snapshotPoll = sdk.timers?.setTimeout
+      ? sdk.timers.setTimeout(() => load(false, true), 2500)
+      : { id: window.setTimeout(() => load(false, true), 2500), clear() { window.clearTimeout(this.id) } }
+  }
+
   function scheduleResourcePoll(delay = 3500) {
     clearResourcePoll()
     resourcePoll = sdk.timers?.setTimeout
@@ -987,6 +1000,11 @@ export async function mount(root, sdk) {
         payload: { source_mode: state.sourceMode, limit: 60, refresh },
       }, { timeout: 90000 })
       state.data = resp.data
+      if (state.data?.cache_status?.status === 'stale' && state.data?.cache_status?.refreshing) scheduleSnapshotPoll()
+      else if (snapshotPoll?.clear) {
+        snapshotPoll.clear()
+        snapshotPoll = null
+      }
       const queuedNotice = (state.data?.warnings || []).find(value => /^正在后台补全\s*\d+/.test(String(value || '')))
       if (refresh && queuedNotice) {
         state.resourceSync.active = true
