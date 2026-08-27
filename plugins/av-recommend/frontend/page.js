@@ -880,6 +880,7 @@ export async function mount(root, sdk) {
         ['演员', breakdown.actor_preference ?? breakdown.preference],
         ['类型', breakdown.category_preference],
         ['关系', breakdown.relationship_preference],
+        ['趋势', breakdown.trend],
         ['资源', breakdown.resources],
         ['质量', breakdown.quality],
         ['降权', breakdown.penalty ? `-${Math.round(breakdown.penalty)}` : '0'],
@@ -895,6 +896,24 @@ export async function mount(root, sdk) {
         li.textContent = reason
         reasons.appendChild(li)
       }
+      const explanation = item.recommendation_explanation || {}
+      const explanationBox = el('details', 'av-rec-explanation')
+      const interval = explanation.confidence || item.confidence_interval || {}
+      const explanationTitle = document.createElement('summary')
+      explanationTitle.textContent = `为什么推荐${interval.lower != null && interval.upper != null ? ` · 置信 ${Math.round(interval.lower)}–${Math.round(interval.upper)}` : ''}`
+      const explanationFactors = el('div', 'av-rec-explanation-factors')
+      for (const factor of (explanation.factors || []).slice(0, 6)) {
+        const node = document.createElement('span')
+        node.innerHTML = `<em>${escapeHtml(factor.label || factor.type || '证据')}</em><strong>${escapeHtml(Math.round(Number(factor.score) || 0))}</strong>`
+        explanationFactors.appendChild(node)
+      }
+      for (const factor of (explanation.counterfactors || []).slice(0, 2)) {
+        const node = document.createElement('span')
+        node.className = 'is-negative'
+        node.innerHTML = `<em>${escapeHtml(factor.label || '降权')}</em><strong>${escapeHtml(Math.round(Number(factor.score) || 0))}</strong>`
+        explanationFactors.appendChild(node)
+      }
+      explanationBox.append(explanationTitle, explanationFactors)
       const buttons = el('div', 'av-rec-card-actions')
       const viewBtn = el('button', '', '详情')
       viewBtn.onclick = () => openDetail(item)
@@ -907,7 +926,7 @@ export async function mount(root, sdk) {
       const ignoreBtn = el('button', '', '忽略')
       ignoreBtn.onclick = () => feedback(item, 'ignore')
       buttons.append(viewBtn, subBtn, likeBtn, dislikeBtn, ignoreBtn)
-      body.append(head, meta, people, scoreParts, reasons, buttons)
+      body.append(head, meta, people, scoreParts, reasons, explanationBox, buttons)
       card.append(image, body)
       grid.appendChild(card)
       exposureObserver?.observe?.(card)

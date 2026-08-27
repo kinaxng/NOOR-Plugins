@@ -45,8 +45,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 17
-PERSONALIZED_MODEL_VERSION = "personal-v17"
+RECOMMENDATION_ALGORITHM_VERSION = 18
+PERSONALIZED_MODEL_VERSION = "personal-v18"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -2450,6 +2450,25 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     raw_confidence = personalized_score * 1.6 + actionability_score * 0.45 - penalty_score * 0.7
     confidence = max(0, min(100, round(raw_confidence * (0.52 + evidence_reliability * 0.48))))
     uncertainty_radius = round(24 * (1 - evidence_reliability))
+    factor_rows = [
+        {"type": "actor", "label": "演员偏好", "score": round(actor_preference_score, 1)},
+        {"type": "category", "label": "题材偏好", "score": round(category_preference_score, 1)},
+        {"type": "relationship", "label": "作品关系", "score": round(relationship_preference_score, 1), "evidence": list(item.get("neighbor_evidence") or [])[:3]},
+        {"type": "semantic", "label": "标题语义", "score": round(semantic_preference_score, 1)},
+        {"type": "trend", "label": "近期趋势", "score": round(trend_preference_score, 1)},
+        {"type": "outcome", "label": "入库结果校准", "score": round(outcome_calibration_score, 1)},
+        {"type": "resource", "label": "资源可用性", "score": round(actionability_score, 1)},
+        {"type": "quality", "label": "作品质量", "score": round(quality_score, 1)},
+    ]
+    factor_rows = sorted((row for row in factor_rows if abs(float(row.get("score") or 0)) >= 0.1), key=lambda row: abs(float(row["score"])), reverse=True)
+    explanation = {
+        "version": 1,
+        "summary": reasons[:5],
+        "factors": factor_rows,
+        "counterfactors": ([{"type": "penalty", "label": "负向与被动曝光信号", "score": round(-penalty_score, 1)}] if penalty_score else []),
+        "confidence": {"value": confidence, "lower": max(0, confidence - uncertainty_radius), "upper": min(100, confidence + uncertainty_radius), "reliability": round(evidence_reliability, 3)},
+        "provenance": {"recall_sources": recall_sources, "portrait_sources": dict(item.get("field_sources") or item.get("portrait_sources") or {})},
+    }
     return {
         "code": code,
         "title": item.get("title") or item.get("display_title") or code,
@@ -2477,6 +2496,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "match_level": match_bucket,
         "confidence": confidence,
         "confidence_interval": {"lower": max(0, confidence - uncertainty_radius), "upper": min(100, confidence + uncertainty_radius), "reliability": round(evidence_reliability, 3)},
+        "recommendation_explanation": explanation,
         "outcome_calibration": round(outcome_calibration_score, 1),
         "route_calibration": round(route_calibration_score, 1),
         "neighbor_score": round(neighbor_score, 3),
@@ -2650,7 +2670,24 @@ async def _enrich_recommendation_resources(
         breakdown["resources"] = round(float(breakdown.get("resources") or 0) + score_boost, 1)
         item["score_breakdown"] = breakdown
         item["actionability_score"] = round(float(item.get("actionability_score") or 0) + score_boost, 1)
-        item["confidence"] = max(0, min(100, round(float(item.get("confidence") or 0) + score_boost * 0.45)))
+        previous_confidence = float(item.get("confidence") or 0)
+        item["confidence"] = max(0, min(100, round(previous_confidence + score_boost * 0.45)))
+        confidence_delta = float(item["confidence"]) - previous_confidence
+        interval = item.get("confidence_interval") if isinstance(item.get("confidence_interval"), dict) else {}
+        if interval:
+            interval["lower"] = max(0, min(100, round(float(interval.get("lower") or 0) + confidence_delta)))
+            interval["upper"] = max(interval["lower"], min(100, round(float(interval.get("upper") or 0) + confidence_delta)))
+            item["confidence_interval"] = interval
+        explanation = item.get("recommendation_explanation") if isinstance(item.get("recommendation_explanation"), dict) else {}
+        if explanation:
+            explanation["confidence"] = {"value": item["confidence"], **interval}
+            factors = explanation.get("factors") if isinstance(explanation.get("factors"), list) else []
+            resource_factor = next((factor for factor in factors if isinstance(factor, dict) and factor.get("type") == "resource"), None)
+            if resource_factor is None:
+                factors.append({"type": "resource", "label": "资源可用性", "score": round(float(breakdown.get("resources") or 0), 1)})
+            else:
+                resource_factor["score"] = round(float(breakdown.get("resources") or 0), 1)
+            explanation["factors"] = sorted(factors, key=lambda row: abs(float(row.get("score") or 0)), reverse=True)
         cap = 100 if float(item.get("personalized_score") or 0) >= 22 else 82
         item["score"] = max(0, min(cap, int(round(float(item.get("score") or 0) + score_boost))))
         item["reasons"] = list(dict.fromkeys(item.get("reasons") or []))[:6]
