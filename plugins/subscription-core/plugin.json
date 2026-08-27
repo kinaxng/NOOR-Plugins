@@ -1,0 +1,34 @@
+{
+  "id": "subscription-core",
+  "name": "订阅中心",
+  "version": "0.1.0",
+  "type": "tool",
+  "description": "NOOR 官方内置订阅与洗版中心。",
+  "tags": ["official", "subscription", "upgrade", "resource"],
+  "capabilities": ["sidebar_page", "subscription_core", "resource_match", "download_submit"],
+  "contributions": {
+    "sidebar": {
+      "label": "订阅中心",
+      "route": "/plugins/subscription-core",
+      "icon": "icons/service.svg"
+    },
+    "icon": "icons/service.svg"
+  },
+  "frontend": {
+    "type": "module",
+    "entry": "frontend/page.js",
+    "style": "frontend/style.css"
+  },
+  "enabled_by_default": true,
+  "default_config": {
+    "auto_check_enabled": true,
+    "check_interval_minutes": 60,
+    "upgrade_score_threshold": 20,
+    "auto_submit_on_match": true,
+    "background_submit_on_match": true,
+    "default_mode": "loose",
+    "default_require_cracked": false,
+    "default_require_subtitle": false,
+    "default_savepath": ""
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "id": "widget-system",
+  "name": "系统监控",
+  "version": "0.2.0",
+  "type": "dashboard_widget",
+  "description": "CPU / 内存 / GPU / VRAM 实时监控，提供概览 Widget 与 Sidebar 指标。",
+  "tags": ["dashboard", "system", "gpu", "sidebar"],
+  "capabilities": ["dashboard_widget", "local_metrics", "sidebar_widget"],
+  "config_schema": {
+    "show_sidebar_widget": {
+      "type": "boolean",
+      "label": "显示在侧边栏",
+      "description": "开启后在左侧 Sidebar 底部插件卡片槽位显示系统监控。",
+      "default": true
+    },
+    "show_dashboard_widget": {
+      "type": "boolean",
+      "label": "显示在概览页",
+      "description": "开启后在概览页显示系统监控组件。",
+      "default": true
+    },
+    "poll_interval_ms": {
+      "type": "number",
+      "label": "刷新间隔毫秒",
+      "default": 5000,
+      "min": 1000,
+      "max": 30000,
+      "step": 500
+    }
+  },
+  "default_config": {
+    "poll_interval_ms": 5000,
+    "show_dashboard_widget": true,
+    "show_sidebar_widget": true
+  },
+  "contributions": {
+    "sidebar_widget": {
+      "key": "system-metrics",
+      "label": "系统监控",
+      "kind": "system_metrics"
+    }
+  },
+  "frontend": {
+    "renderer": "frontend/renderer.js",
+    "renderer_style": "frontend/renderer.css"
+  },
+  "enabled_by_default": true
+}

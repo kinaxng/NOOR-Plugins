@@ -1,0 +1,106 @@
+{
+  "id": "javdb",
+  "name": "JavDB",
+  "version": "0.1.0",
+  "type": "rss_source",
+  "description": "JavDB/DB Online 接入：榜单、最新、搜索、演员、Top250、磁链与元数据，并贡献到 Knowledge Core。",
+  "tags": [
+    "javdb",
+    "metadata",
+    "movies",
+    "knowledge"
+  ],
+  "capabilities": [
+    "network_outbound",
+    "rss_fetch",
+    "sidebar_page",
+    "download_submit",
+    "resource_search",
+    "knowledge_provider",
+    "dashboard_widget"
+  ],
+  "enabled_by_default": false,
+  "config_schema": {
+    "base_url": {
+      "type": "string",
+      "label": "JavDB 地址",
+      "placeholder": "http://localhost:9090"
+    },
+    "api_key": {
+      "type": "password",
+      "label": "API Key / 密码",
+      "placeholder": "X-API-Key，例如 your-api-key"
+    },
+    "downloader_binding": {
+      "type": "select",
+      "label": "下载器绑定",
+      "multi": true,
+      "options": [
+        {
+          "label": "qBittorrent",
+          "value": "qbittorrent"
+        },
+        {
+          "label": "Transmission",
+          "value": "transmission"
+        },
+        {
+          "label": "迅雷远程",
+          "value": "xunlei-remote"
+        }
+      ],
+      "default": []
+    },
+    "default_downloader": {
+      "type": "select",
+      "label": "默认下载器",
+      "options": [
+        {
+          "label": "跟随系统",
+          "value": "none"
+        },
+        {
+          "label": "qBittorrent",
+          "value": "qbittorrent"
+        },
+        {
+          "label": "Transmission",
+          "value": "transmission"
+        },
+        {
+          "label": "迅雷远程",
+          "value": "xunlei-remote"
+        }
+      ],
+      "default": "none"
+    },
+    "timeout": {
+      "type": "number",
+      "label": "请求超时秒数",
+      "default": 15,
+      "min": 3,
+      "max": 60,
+      "step": 1
+    }
+  },
+  "default_config": {
+    "base_url": "http://localhost:9090",
+    "api_key": "",
+    "downloader_binding": [],
+    "default_downloader": "none",
+    "timeout": 15
+  },
+  "contributions": {
+    "sidebar": {
+      "label": "JavDB",
+      "route": "/plugins/javdb",
+      "icon": "icons/service.svg"
+    },
+    "icon": "icons/service.svg"
+  },
+  "frontend": {
+    "type": "module",
+    "entry": "frontend/page.js",
+    "style": "frontend/style.css"
+  }
+}

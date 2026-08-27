@@ -1,0 +1,44 @@
+{
+  "id": "avdb",
+  "name": "AVDB",
+  "version": "0.1.0",
+  "type": "source",
+  "description": "通过独立 AVDB article/torrent API 搜索影片资源。",
+  "capabilities": ["resource_search", "network_outbound"],
+  "enabled_by_default": false,
+  "default_config": {
+    "base_url": "",
+    "torrents_path": "/api/v1/articles/torrents",
+    "access_token": "",
+    "api_key": "",
+    "timeout": 15,
+    "downloader_binding": [],
+    "default_downloader": "none"
+  },
+  "config_schema": {
+    "base_url": {"type": "string", "label": "AVDB API 地址", "description": "填写实际 AVDB 服务根地址，不使用 DBOnline 地址。"},
+    "torrents_path": {"type": "string", "label": "种子搜索路径"},
+    "access_token": {"type": "password", "label": "访问令牌", "description": "AVDB 登录接口签发的 Bearer Token；填写后优先使用。"},
+    "api_key": {"type": "password", "label": "旧版 API Key（可选）"},
+    "timeout": {"type": "number", "label": "请求超时（秒）", "min": 3, "max": 60},
+    "downloader_binding": {
+      "type": "select", "label": "下载器绑定", "multi": true,
+      "options": [
+        {"label": "qBittorrent", "value": "qbittorrent"},
+        {"label": "Transmission", "value": "transmission"},
+        {"label": "迅雷远程", "value": "xunlei-remote"}
+      ],
+      "default": []
+    },
+    "default_downloader": {
+      "type": "select", "label": "默认下载器",
+      "options": [
+        {"label": "跟随绑定", "value": "none"},
+        {"label": "qBittorrent", "value": "qbittorrent"},
+        {"label": "Transmission", "value": "transmission"},
+        {"label": "迅雷远程", "value": "xunlei-remote"}
+      ],
+      "default": "none"
+    }
+  }
+}

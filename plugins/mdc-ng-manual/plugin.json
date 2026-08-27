@@ -1,0 +1,84 @@
+{
+  "id": "mdc-ng-manual",
+  "name": "MDC-NG 手动任务",
+  "version": "0.1.0",
+  "type": "knowledge_app",
+  "description": "向 MDC-NG 的手动任务页提交整理任务，并回看最近任务结果。",
+  "tags": [
+    "mdc-ng",
+    "manual-jobs",
+    "scrape",
+    "reorganize"
+  ],
+  "capabilities": [
+    "network_outbound",
+    "external_task_provider"
+  ],
+  "enabled_by_default": false,
+  "config_schema": {
+    "base_url": {
+      "type": "string",
+      "label": "MDC-NG 地址",
+      "placeholder": "http://localhost:9208"
+    },
+    "cookie": {
+      "type": "textarea",
+      "label": "Cookie",
+      "placeholder": "可选；当 MDC-NG 开启登录时填写浏览器 Cookie"
+    },
+    "timeout": {
+      "type": "number",
+      "label": "请求超时秒数",
+      "default": 20,
+      "min": 3,
+      "max": 120,
+      "step": 1
+    },
+    "local_source_prefix": {
+      "type": "string",
+      "label": "NOOR 本机源路径前缀",
+      "placeholder": "/mnt/media/downloads"
+    },
+    "mdc_source_prefix": {
+      "type": "string",
+      "label": "MDC-NG 可见源路径前缀",
+      "placeholder": "/data/downloads"
+    },
+    "source_path_mappings": {
+      "type": "textarea",
+      "label": "高级路径映射",
+      "placeholder": "/mnt/media/downloads => /data/downloads"
+    }
+  },
+  "default_config": {
+    "base_url": "http://localhost:9208",
+    "cookie": "",
+    "timeout": 20,
+    "local_source_prefix": "",
+    "mdc_source_prefix": "",
+    "source_path_mappings": ""
+  },
+  "contributions": {
+    "external_task": {
+      "label": "MDC-NG",
+      "phase_label": "MDC-NG 重新整理",
+      "can_cancel": false,
+      "poll_interval": 10000
+    },
+    "hardlink_source_actions": [
+      {
+        "id": "mdc-reorganize",
+        "label": "重新整理",
+        "action": "create",
+        "tone": "secondary",
+        "requires_test": true
+      }
+    ],
+    "icon": "icons/service.svg"
+  },
+  "frontend": {
+    "type": "module",
+    "entry": "frontend/page.js",
+    "style": "frontend/style.css"
+  }
+}

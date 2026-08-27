@@ -1,0 +1,70 @@
+{
+  "id": "mteam-plugin",
+  "name": "M-Team",
+  "version": "0.2.0",
+  "type": "rss_source",
+  "description": "M-Team PT integration: RSS feed, API cover lookup, download push and subtitle search",
+  "tags": ["pt", "rss", "m-team"],
+  "capabilities": [
+    "network_outbound",
+    "rss_fetch",
+    "sidebar_page",
+    "resource_search",
+    "subtitle_search",
+    "knowledge_provider"
+  ],
+  "config_schema": {
+    "base_url": {"type": "string", "label": "BASE URL（官方 API 站点）", "placeholder": "https://api.m-team.cc"},
+    "rss_url": {"type": "string", "label": "RSS 地址"},
+    "cache_days": {"type": "number", "label": "DMM 图片缓存天数", "default": 7, "min": 1, "max": 60, "step": 1},
+    "downloader_binding": {
+      "type": "select",
+      "label": "下载器绑定",
+      "multi": true,
+      "options": [
+        {"label": "qBittorrent", "value": "qbittorrent"},
+        {"label": "Transmission", "value": "transmission"}
+      ],
+      "default": []
+    },
+    "default_downloader": {
+      "type": "select",
+      "label": "默认下载器",
+      "options": [
+        {"label": "跟随绑定", "value": "none"},
+        {"label": "qBittorrent", "value": "qbittorrent"},
+        {"label": "Transmission", "value": "transmission"}
+      ],
+      "default": "none"
+    },
+    "api_key": {"type": "password", "label": "令牌（API KEY）"},
+    "subtitle_search_enabled": {"type": "boolean", "label": "开启字幕下载", "default": false},
+    "use_default_acceleration": {"type": "boolean", "label": "复用默认加速", "default": true},
+    "subtitle_search_limit": {"type": "number", "label": "字幕搜索条数", "default": 20, "min": 1, "max": 100}
+  },
+  "default_config": {
+    "base_url": "https://api.m-team.cc",
+    "api_key": "",
+    "rss_url": "",
+    "timeout": 15,
+    "subtitle_search_enabled": false,
+    "subtitle_search_limit": 20,
+    "downloader_binding": [],
+    "default_downloader": "none",
+    "use_default_acceleration": true,
+    "cache_days": 7,
+    "filter_dmm_images": true,
+    "resolve_dmm_cover_via_api": true,
+    "max_api_cover_resolve": 40,
+    "max_image_cache_per_fetch": 40,
+    "knowledge_active_search": true,
+    "knowledge_search_code_limit": 20,
+    "knowledge_search_concurrency": 4,
+    "knowledge_search_per_code": 3
+  },
+  "contributions": {
+    "sidebar": {"label": "M-Team", "route": "/plugins/mteam-plugin", "icon": "icons/service.svg"},
+    "icon": "icons/service.svg"
+  },
+  "frontend": {"type": "module", "entry": "frontend/page.js", "style": "frontend/style.css"}
+}

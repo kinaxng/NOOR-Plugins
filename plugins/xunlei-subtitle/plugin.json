@@ -1,0 +1,15 @@
+{
+  "id": "xunlei-subtitle",
+  "name": "迅雷字幕",
+  "version": "0.2.0",
+  "type": "subtitle_provider",
+  "description": "迅雷在线字幕搜索源",
+  "tags": ["subtitle", "xunlei"],
+  "capabilities": ["network_outbound", "subtitle_search"],
+  "enabled_by_default": true,
+  "config_schema": {
+    "api_url": {"type": "string", "label": "接口地址", "default": "https://api-shoulei-ssl.xunlei.com/oracle/subtitle"},
+    "timeout": {"type": "number", "label": "请求超时秒数", "default": 30, "min": 5, "max": 120, "step": 1}
+  },
+  "default_config": {"api_url": "https://api-shoulei-ssl.xunlei.com/oracle/subtitle", "timeout": 30}
+}

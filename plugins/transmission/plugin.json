@@ -1,0 +1,23 @@
+{
+  "id": "transmission",
+  "name": "Transmission",
+  "version": "0.1.0",
+  "type": "downloader",
+  "description": "通过 Transmission RPC 提交和管理下载任务。",
+  "capabilities": ["downloader", "remote_tasks", "network_outbound"],
+  "enabled_by_default": false,
+  "default_config": {
+    "rpc_url": "http://127.0.0.1:9091/transmission/rpc",
+    "username": "",
+    "password": "",
+    "download_dir": "",
+    "timeout": 20
+  },
+  "config_schema": {
+    "rpc_url": {"type": "string", "label": "Transmission RPC 地址"},
+    "username": {"type": "string", "label": "用户名"},
+    "password": {"type": "password", "label": "密码"},
+    "download_dir": {"type": "string", "label": "默认保存路径"},
+    "timeout": {"type": "number", "label": "请求超时（秒）", "min": 5, "max": 120}
+  }
+}

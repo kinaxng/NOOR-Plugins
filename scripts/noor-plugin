@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cmd="${1:-}"
+if [[ -z "$cmd" ]]; then
+  echo "Usage: scripts/noor-plugin validate <plugin-dir|plugins-dir> [--strict]" >&2
+  exit 2
+fi
+shift
+case "$cmd" in
+  validate) exec python3 "$ROOT/tools/noor_plugin/validate.py" "$@" ;;
+  create) exec python3 "$ROOT/tools/noor_plugin/create.py" "$@" ;;
+  pack) exec python3 "$ROOT/tools/noor_plugin/pack.py" "$@" ;;
+  *) echo "Unknown command: $cmd" >&2; exit 2 ;;
+esac

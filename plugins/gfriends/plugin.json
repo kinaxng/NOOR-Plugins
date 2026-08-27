@@ -1,0 +1,70 @@
+{
+  "id": "gfriends",
+  "name": "Gfriends",
+  "version": "0.1.0",
+  "type": "knowledge_app",
+  "description": "基于 gfriends 的演员头像库辅助工具，用于在编辑演员资料时查询并选择候选头像。",
+  "tags": ["avatar", "gfriends", "actor"],
+  "capabilities": ["network_outbound", "avatar_library"],
+  "enabled_by_default": false,
+  "config_schema": {
+    "filetree_url": {
+      "type": "string",
+      "label": "Filetree.json 地址",
+      "default": "https://cdn.jsdelivr.net/gh/xinxin8816/gfriends/Filetree.json"
+    },
+    "asset_base_url": {
+      "type": "string",
+      "label": "头像资源根地址",
+      "default": "https://cdn.jsdelivr.net/gh/xinxin8816/gfriends/Content/"
+    },
+    "cache_images": {
+      "type": "boolean",
+      "label": "本地缓存命中头像",
+      "default": true
+    },
+    "cache_days": {
+      "type": "number",
+      "label": "头像缓存天数",
+      "default": 30,
+      "min": 1,
+      "max": 365,
+      "step": 1
+    },
+    "index_ttl_hours": {
+      "type": "number",
+      "label": "索引刷新间隔小时",
+      "default": 24,
+      "min": 1,
+      "max": 168,
+      "step": 1
+    },
+    "timeout": {
+      "type": "number",
+      "label": "请求超时秒数",
+      "default": 20,
+      "min": 3,
+      "max": 120,
+      "step": 1
+    }
+  },
+  "default_config": {
+    "filetree_url": "https://cdn.jsdelivr.net/gh/xinxin8816/gfriends/Filetree.json",
+    "asset_base_url": "https://cdn.jsdelivr.net/gh/xinxin8816/gfriends/Content/",
+    "cache_images": true,
+    "cache_days": 30,
+    "index_ttl_hours": 24,
+    "timeout": 20
+  },
+  "contributions": {
+    "icon": "icons/service.svg",
+    "avatar_library": {
+      "label": "Gfriends 头像库"
+    }
+  },
+  "frontend": {
+    "type": "module",
+    "entry": "frontend/page.js",
+    "style": "frontend/style.css"
+  }
+}

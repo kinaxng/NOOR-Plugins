@@ -1,0 +1,126 @@
+{
+  "id": "xunlei-remote",
+  "name": "迅雷远程",
+  "version": "0.1.0",
+  "type": "downloader",
+  "description": "通过群晖迅雷 NAS Web API 管理远程下载任务，并自动使用可用的试用加速次数。",
+  "tags": [
+    "xunlei",
+    "thunder",
+    "downloader",
+    "remote"
+  ],
+  "capabilities": [
+    "downloader",
+    "remote_tasks",
+    "network_outbound",
+    "download_submit",
+    "sidebar_page"
+  ],
+  "enabled_by_default": false,
+  "default_config": {
+    "base_url": "",
+    "entry_path": "/webman/3rdparty/pan-xunlei-com/index.cgi/",
+    "authorization": "",
+    "pan_auth": "",
+    "insecure_skip_verify": true,
+    "savepath": "",
+    "restore_scan_roots": "",
+    "restore_path_mappings": "",
+    "timeout": 30,
+    "cookie": "",
+    "file_indices": "auto",
+    "min_file_size_mb": 100,
+    "auto_try_speed": true,
+    "auto_try_speed_interval": 15
+  },
+  "config_schema": {
+    "base_url": {
+      "type": "string",
+      "label": "群晖地址",
+      "description": "例如 https://nas:5001"
+    },
+    "entry_path": {
+      "type": "string",
+      "label": "迅雷入口路径"
+    },
+    "authorization": {
+      "type": "password",
+      "label": "DSM Authorization",
+      "description": "从迅雷 NAS 请求头复制完整 Authorization: Basic ... 值。"
+    },
+    "cookie": {
+      "type": "textarea",
+      "label": "Cookie",
+      "placeholder": "_SSID=...; SID=...; xtoken=...",
+      "description": "群晖套件常见场景只需要 Cookie。可从迅雷 NAS 页面请求头复制完整 Cookie。"
+    },
+    "pan_auth": {
+      "type": "password",
+      "label": "pan_auth（可选）",
+      "description": "留空时从迅雷页面自动提取。"
+    },
+    "insecure_skip_verify": {
+      "type": "boolean",
+      "label": "跳过证书校验",
+      "description": "自签名群晖/迅雷地址默认开启。"
+    },
+    "savepath": {
+      "type": "string",
+      "label": "默认保存路径",
+      "description": "必须能被迅雷 NAS 解析为实际目录；解析失败时不会回退到默认目录。"
+    },
+    "restore_scan_roots": {
+      "type": "textarea",
+      "label": "残留文件扫描目录",
+      "description": "每行一个本地目录，用于扫描 .xltd/.xtld 未完成文件。"
+    },
+    "restore_path_mappings": {
+      "type": "textarea",
+      "label": "残留文件路径映射",
+      "description": "每行 local=remote，用于把本地扫描路径映射为 NAS 远程路径。"
+    },
+    "timeout": {
+      "type": "number",
+      "label": "请求超时（秒）",
+      "min": 5,
+      "max": 120
+    },
+    "file_indices": {
+      "type": "string",
+      "label": "默认文件选择",
+      "placeholder": "auto / --1 / 0 / 1,3 / 1-5",
+      "description": "默认 auto：自动跳过明显广告小文件，保留字幕；--1 表示全部下载。"
+    },
+    "min_file_size_mb": {
+      "type": "number",
+      "label": "小文件过滤（MB）",
+      "min": 0,
+      "max": 4096
+    },
+    "auto_try_speed": {
+      "type": "boolean",
+      "label": "自动使用试用加速",
+      "description": "检测到等待中或下载中的任务时，自动领取可用的迅雷试用加速次数。"
+    },
+    "auto_try_speed_interval": {
+      "type": "number",
+      "label": "加速检测间隔（秒）",
+      "min": 10,
+      "max": 300
+    }
+  },
+  "contributions": {
+    "sidebar": {
+      "label": "迅雷远程",
+      "route": "/plugins/xunlei-remote",
+      "icon": "icons/sidebar.svg"
+    },
+    "icon": "icons/sidebar.svg"
+  },
+  "frontend": {
+    "type": "module",
+    "entry": "frontend/page.js",
+    "style": "frontend/style.css"
+  }
+}

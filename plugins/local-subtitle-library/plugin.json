@@ -1,0 +1,16 @@
+{
+  "id": "local-subtitle-library",
+  "name": "本地字幕库",
+  "version": "0.2.0",
+  "type": "subtitle_provider",
+  "description": "搜索本地字幕库路径，支持索引与模糊匹配",
+  "tags": ["subtitle", "local"],
+  "capabilities": ["subtitle_search", "subtitle_search_local"],
+  "enabled_by_default": true,
+  "config_schema": {
+    "library_paths": {"type": "textarea", "label": "字幕库路径", "description": "每行一个目录。插件会在这些目录中查找同番号字幕。"},
+    "index_enabled": {"type": "boolean", "label": "启用索引", "description": "字幕库很大时建议开启。"},
+    "match_fuzzy": {"type": "boolean", "label": "模糊匹配", "description": "允许番号与更长文件名进行宽松匹配。"}
+  },
+  "default_config": {}
+}
