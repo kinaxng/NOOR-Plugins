@@ -240,6 +240,9 @@ export async function mount(root, sdk) {
     const data = state.data || {}
     const p = data.profile || {}
     const stats = data.stats || {}
+    const actorDiversity = stats.diversity?.actors || {}
+    const routes = stats.route_evaluation?.routes || {}
+    const activeRoutes = Object.values(routes).filter(item => item?.adaptation_status === 'active').length
     profile.innerHTML = ''
     const cards = [
       ['媒体库', p.media_count || 0, '已分析作品'],
@@ -248,6 +251,8 @@ export async function mount(root, sdk) {
       ['推荐', data.total || 0, '综合排序'],
       ['候选池', fmtPool(stats.candidate_pool_total, stats.candidate_pool_today), state.sourceMode === 'full' ? '完整累计+今日' : '历史累计+今日'],
       ['模型', data.model?.version || '-', data.model?.mode === 'auto' ? '自动保护' : '手动选择'],
+      ['覆盖', actorDiversity.unique || 0, `有效演员 ${actorDiversity.effective || 0}`],
+      ['路线学习', `${activeRoutes}/${Object.keys(routes).length}`, `${stats.route_evaluation?.eligible || 0} 个成熟样本`],
     ]
     for (const [name, value, desc] of cards) {
       const card = el('div', 'av-rec-stat')

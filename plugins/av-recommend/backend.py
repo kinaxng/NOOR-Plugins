@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 20
-PERSONALIZED_MODEL_VERSION = "personal-v20"
+RECOMMENDATION_ALGORITHM_VERSION = 21
+PERSONALIZED_MODEL_VERSION = "personal-v21"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -133,7 +133,7 @@ def _recommendation_cache_put(cache_key: str, value: dict[str, Any], *, source_m
     _CACHE["entries"] = dict(data["entries"])
 
 
-def _latest_mode_snapshot(source_mode: str, requested_limit: int, *, max_age_seconds: int = 23400) -> dict[str, Any] | None:
+def _latest_mode_snapshot(source_mode: str, requested_limit: int, *, ttl_seconds: int = DEFAULT_CACHE_TTL, max_age_seconds: int = 23400) -> dict[str, Any] | None:
     """Return a bounded persisted snapshot without waiting for a generation lock."""
     entries = _load_recommendation_cache().get("entries", {})
     ranked = sorted(
@@ -148,9 +148,14 @@ def _latest_mode_snapshot(source_mode: str, requested_limit: int, *, max_age_sec
             continue
         result = copy.deepcopy(value)
         items = result.get("items") if isinstance(result.get("items"), list) else []
+        stored_limit = max(len(items), int(result.get("requested_limit") or 0))
+        if stored_limit < requested_limit:
+            continue
         result["items"] = items[:requested_limit]
         result["total"] = len(result["items"])
-        result["cache_status"] = {"status": "stale", "age_seconds": round(age_seconds, 1), "refreshing": True}
+        model_version = str((result.get("model") or {}).get("version") or "")
+        stale = bool(entry.get("invalidated_at")) or age_seconds >= ttl_seconds or int(result.get("algorithm_version") or 0) != RECOMMENDATION_ALGORITHM_VERSION or model_version not in {PERSONALIZED_MODEL_VERSION, STABLE_MODEL_VERSION}
+        result["cache_status"] = {"status": "stale" if stale else "fresh", "age_seconds": round(age_seconds, 1), "refreshing": stale}
         return result
     return None
 
@@ -971,13 +976,14 @@ def _model_evaluation(store: dict[str, Any]) -> dict[str, Any]:
 
 
 def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
-    """Estimate route value from converted or mature exposure cohorts."""
+    """Estimate route value with fractional attribution and stratified controls."""
     now_ms = int(now_ms or _now_ms())
     mature_age_ms = 7 * 86400 * 1000
     routes: dict[str, dict[str, Any]] = {}
     eligible_rows = 0
     converted_rows = 0
     conversion_value_sum = 0.0
+    cohorts: list[dict[str, Any]] = []
     for row in (store.get("exposures") or {}).values():
         if not isinstance(row, dict):
             continue
@@ -990,22 +996,54 @@ def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> di
         converted_rows += int(converted)
         conversion_value_sum += value
         converted_routes = set(row.get("converted_routes") or row.get("last_routes") or []) if value > 0 else set()
+        row_routes = {str(route) for route, evidence in (row.get("routes") or {}).items() if isinstance(evidence, dict)}
+        credited_routes = converted_routes & row_routes
+        credit_share = 1 / max(1, len(credited_routes))
+        strategy = str(row.get("converted_strategy") or row.get("last_strategy") or "ranking")
+        rank = int(row.get("converted_rank") or row.get("last_rank") or 0)
+        rank_bucket = "top10" if 0 < rank <= 10 else "top24" if rank <= 24 else "tail"
+        cohorts.append({"value": value, "qualified": converted, "routes": row_routes, "stratum": f"{strategy}:{rank_bucket}"})
         for route, evidence in (row.get("routes") or {}).items():
             if not isinstance(evidence, dict):
                 continue
             metric = routes.setdefault(str(route), {"exposed": 0, "impressions": 0, "converted": 0, "verified": 0, "conversion_value_sum": 0.0})
             metric["exposed"] += 1
             metric["impressions"] += int(evidence.get("batch_count") or 0)
-            metric["converted"] += int(converted and route in converted_routes)
-            metric["verified"] += int(value >= VERIFIED_CONVERSION_THRESHOLD and route in converted_routes)
-            metric["conversion_value_sum"] += value if route in converted_routes else 0.0
+            attributed = credit_share if route in credited_routes else 0.0
+            metric["converted"] += attributed if converted else 0.0
+            metric["verified"] += attributed if value >= VERIFIED_CONVERSION_THRESHOLD else 0.0
+            metric["conversion_value_sum"] += value * attributed
     global_rate = (conversion_value_sum + 2) / (eligible_rows + 10)
-    for metric in routes.values():
+    for route, metric in routes.items():
         exposed = int(metric["exposed"])
-        converted = int(metric["converted"])
+        converted = float(metric["converted"])
         posterior = (float(metric["conversion_value_sum"]) + 2) / (exposed + 10)
-        reliability = exposed / (exposed + 20)
-        factor = max(0.8, min(1.2, 1 + (posterior - global_rate) * 1.5 * reliability))
+        reliability = exposed / (exposed + 30)
+        strata: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"treated": [], "control": []})
+        for cohort in cohorts:
+            arm = "treated" if route in cohort["routes"] else "control"
+            strata[cohort["stratum"]][arm].append(float(cohort["value"]))
+        lift_sum = 0.0
+        comparable = 0.0
+        comparable_strata = 0
+        for arms in strata.values():
+            treated, control = arms["treated"], arms["control"]
+            if not treated or not control:
+                continue
+            # Harmonic support prevents a large treatment arm with one control
+            # row from looking like strong counterfactual evidence.
+            support = 2 * len(treated) * len(control) / (len(treated) + len(control))
+            lift_sum += (sum(treated) / len(treated) - sum(control) / len(control)) * support
+            comparable += support
+            comparable_strata += 1
+        counterfactual_lift = lift_sum / comparable if comparable else 0.0
+        counterfactual_reliability = comparable / (comparable + 20)
+        adaptive = exposed >= 20
+        factor = 1.0
+        if adaptive:
+            factor += (posterior - global_rate) * 1.2 * reliability
+            factor += counterfactual_lift * 0.8 * counterfactual_reliability
+            factor = max(0.85, min(1.15, factor))
         lower, upper = _wilson_interval(converted, exposed)
         metric.update({
             "conversion_rate": round(converted / max(exposed, 1), 4),
@@ -1014,8 +1052,23 @@ def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> di
             "conversion_interval": {"lower": round(lower, 4), "upper": round(upper, 4)},
             "reliability": round(reliability, 3),
             "weight": round(factor, 3),
+            "adaptation_status": "active" if adaptive else "observing",
+            "counterfactual": {
+                "lift": round(counterfactual_lift, 4),
+                "comparable_support": round(comparable, 1),
+                "strata": comparable_strata,
+                "reliability": round(counterfactual_reliability, 3),
+            },
         })
-    return {"routes": routes, "eligible": eligible_rows, "converted": converted_rows, "prior": {"alpha": 2, "beta": 8}, "generated_at": now_ms}
+    return {
+        "routes": routes,
+        "eligible": eligible_rows,
+        "converted": converted_rows,
+        "prior": {"alpha": 2, "beta": 8},
+        "counterfactual_method": "strategy_rank_stratified_fractional_attribution",
+        "minimum_adaptation_sample": 20,
+        "generated_at": now_ms,
+    }
 
 
 def _exploration_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
@@ -3264,6 +3317,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     result = {
         "ok": True,
         "generated_at": _now_ms(),
+        "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
         "requested_limit": requested_limit,
         "source_mode": source_mode,
         "source_label": "完整推荐" if source_mode == "full" else "最新推荐",
@@ -3352,10 +3406,13 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     """Single-flight each mode without letting full maintenance block latest."""
     source_mode = str(payload.get("source_mode") or "latest").strip().lower()
     lock = _recommendation_generation_locks["full" if source_mode == "full" else "latest"]
-    if lock.locked() and not payload.get("refresh"):
+    if not payload.get("refresh"):
         requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
-        snapshot = _latest_mode_snapshot(source_mode, requested_limit)
+        ttl_seconds = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
+        snapshot = _latest_mode_snapshot(source_mode, requested_limit, ttl_seconds=ttl_seconds)
         if snapshot is not None:
+            if snapshot.get("cache_status", {}).get("status") == "stale":
+                _schedule_recommendation_refresh(config, payload, f"mode-snapshot:{source_mode}:{requested_limit}")
             return snapshot
     async with lock:
         return await _recommendations_unlocked(config, payload)
