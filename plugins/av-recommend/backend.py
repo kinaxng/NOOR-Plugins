@@ -2025,9 +2025,32 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
         "disliked_actors": _feedback_counter(store.get("disliked"), "actors"),
         "disliked_categories": _feedback_counter(store.get("disliked"), "categories"),
     }
+    requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
+    cache_ttl = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
+    # This key intentionally avoids library/profile work. Cache invalidation
+    # handles feedback and candidate-pool changes, while the TTL bounds how
+    # long a newly imported library item can remain visible in recommendations.
+    # Looking this up first is what makes a normal page visit a real cache hit.
+    fast_cache_key = json.dumps({
+        "kind": "request-v2",
+        "config": config,
+        "ignored": sorted(feedback["ignored_codes"]),
+        "liked": sorted(feedback["liked_codes"]),
+        "disliked": sorted(feedback["disliked_codes"]),
+        "liked_actors": dict(feedback["liked_actors"]),
+        "liked_categories": dict(feedback["liked_categories"]),
+        "disliked_actors": dict(feedback["disliked_actors"]),
+        "disliked_categories": dict(feedback["disliked_categories"]),
+        "source_mode": source_mode,
+        "requested_limit": requested_limit,
+    }, sort_keys=True, ensure_ascii=False)
+    if not payload.get("refresh"):
+        cached = _recommendation_cache_get(fast_cache_key, cache_ttl)
+        if cached is not None:
+            return cached
+
     profile = await _library_profile()
     live_codes, live_warning = await _live_library_codes(config, force=bool(payload.get("refresh")))
-    requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
     cache_key = json.dumps({
         "config": config,
         "ignored": sorted(feedback["ignored_codes"]),
@@ -2043,7 +2066,6 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
         "source_mode": source_mode,
         "requested_limit": requested_limit,
     }, sort_keys=True, ensure_ascii=False)
-    cache_ttl = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
     if not payload.get("refresh"):
         cached = _recommendation_cache_get(cache_key, cache_ttl)
         if cached is not None:
@@ -2135,6 +2157,7 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
         "warnings": warnings,
     }
     _recommendation_cache_put(cache_key, result)
+    _recommendation_cache_put(fast_cache_key, result)
     return result
 
 

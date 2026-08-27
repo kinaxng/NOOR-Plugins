@@ -813,7 +813,7 @@ export async function mount(root, sdk) {
     try {
       const resp = await sdk.api.post('/plugins/av-recommend/actions/recommendations', {
         payload: { source_mode: state.sourceMode, limit: 60, refresh },
-      })
+      }, { timeout: 90000 })
       state.data = resp.data
     } catch (e) {
       state.error = e?.response?.data?.detail || e?.message || '推荐加载失败'
