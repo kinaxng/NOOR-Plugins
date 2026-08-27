@@ -20,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, canonical_actor_name, semantic_tokens
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, canonical_actor_name, semantic_tokens
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -44,6 +44,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
+RECOMMENDATION_ALGORITHM_VERSION = 3
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
 _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
@@ -1616,14 +1617,14 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         reasons.append("负反馈演员降权")
 
     category_hits = []
-    for name in categories:
+    for name in base_categories:
         count = _combined_category_count(name, genre_counter, tag_counter)
         if count > 0:
             category_hits.append((name, count, _generic_category_factor(name)))
     if category_hits:
         sorted_hits = sorted(category_hits, key=lambda x: x[1] * x[2], reverse=True)
         names = "/".join(name for name, _, factor in sorted_hits[:3] if factor >= 0.5)
-        boost = min(24, sum(min(6.5, math.sqrt(count) * 2.9 + _preference_confidence(count, media_count) * 2) * factor for _, count, factor in sorted_hits[:6]))
+        boost = min(20, sum(min(6.0, math.sqrt(count) * 2.6 + _preference_confidence(count, media_count) * 1.8) * factor for _, count, factor in sorted_hits[:5]))
         score += boost
         personalized_score += boost
         category_preference_score += boost
@@ -1633,7 +1634,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     title_trait_hits = [(name, float(title_trait_counter.get(name) or 0)) for name in title_traits if float(title_trait_counter.get(name) or 0) > 0]
     if title_trait_hits:
         sorted_traits = sorted(title_trait_hits, key=lambda row: row[1], reverse=True)
-        boost = min(16, sum(min(4.8, math.sqrt(count) * 2.1 + _preference_confidence(int(round(count)), media_count) * 1.6) for _, count in sorted_traits[:5]))
+        boost = min(10, sum(min(4.0, math.sqrt(count) * 1.7 + _preference_confidence(int(round(count)), media_count) * 1.2) for _, count in sorted_traits[:4]))
         score += boost
         personalized_score += boost
         category_preference_score += boost
@@ -1674,28 +1675,28 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         for category in categories:
             count = actor_category_counter.get((actor, category), 0)
             factor = _generic_category_factor(category)
-            if count > 0 and factor >= 0.5:
+            if count >= 2 and factor >= 0.5:
                 actor_count = max(actor_counter.get(actor, 0), 1)
                 category_count = max(_combined_category_count(category, genre_counter, tag_counter), 1)
-                lift = count / math.sqrt(actor_count * category_count)
+                expected = actor_count * category_count / media_count
+                lift = (count + 0.5) / (expected + 0.5)
                 combo_hits.append((actor, category, count, factor, lift))
     if combo_hits:
-        actor, category, count, factor, lift = max(combo_hits, key=lambda x: (x[2] * x[3], x[4]))
-        boost = min(24, (5 if count <= 1 else 9) + math.log2(count + 1) * 5 * factor + min(5, lift * 7))
-        score += boost
-        personalized_score += boost
-        relationship_preference_score += boost
-        reasons.append(f"组合偏好：{actor} + {category} 出现 {count} 次")
+        actor, category, count, factor, lift = max(combo_hits, key=lambda x: (math.log2(max(x[4], 1)) * x[3], x[2]))
+        significance = max(0.0, math.log2(max(lift, 1)) - 0.35)
+        support = 1 - math.exp(-(count - 1) / 2)
+        boost = min(12, significance * 4.5 * support * factor + min(3, math.log2(count) * factor))
+        if lift >= 1.35 and boost >= 1:
+            score += boost
+            personalized_score += boost
+            relationship_preference_score += boost
+            reasons.append(f"组合偏好：{actor} + {category} · {count} 次 · 提升 {lift:.1f}×")
 
     # If the candidate has no familiar actor but several strong preferred tags,
     # mark it as a controlled discovery rather than letting it look random.
     if not actor_hits and category_hits:
         strong_category_count = sum(1 for _, count, factor in category_hits if count >= 2 and factor >= 0.5)
         if strong_category_count >= 2:
-            discovery_boost = min(8, strong_category_count * 2.5)
-            score += discovery_boost
-            personalized_score += discovery_boost
-            category_preference_score += discovery_boost
             reasons.append("类型探索")
 
     if maker and studio_counter.get(maker, 0):
@@ -2109,16 +2110,27 @@ def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str
 
     seed = dt.date.today().isoformat()
 
-    def exploration_key(item: dict[str, Any]) -> bytes:
-        value = str(item.get("code") or item.get("title") or "")
-        return hashlib.sha256(f"{seed}:{value}".encode("utf-8")).digest()
+    def exploration_value(item: dict[str, Any]) -> float:
+        personalized = float(item.get("personalized_score") or 0)
+        actionable = float(item.get("actionability_score") or 0)
+        breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+        novelty = 4.0 if float(breakdown.get("actor_preference") or 0) <= 0 else 0.0
+        digest = hashlib.sha256(f"{seed}:{item.get('code') or item.get('title') or ''}".encode("utf-8")).digest()
+        jitter = int.from_bytes(digest[:2], "big") / 65535 * 2
+        return personalized * 0.62 + actionable * 0.22 + novelty + jitter
 
     top = items[:limit]
-    pool = sorted(items[limit:], key=exploration_key)
+    eligible = [item for item in items[limit:] if float(item.get("personalized_score") or 0) >= 8]
+    pool = sorted(eligible or items[limit:], key=exploration_value, reverse=True)
     picks = pool[:exploration_count]
     step = max(1, round(limit / (len(picks) + 1)))
     position = step
     for pick in picks:
+        pick["is_exploration"] = True
+        reasons = pick.get("reasons") if isinstance(pick.get("reasons"), list) else []
+        if "探索位：相邻偏好" not in reasons:
+            reasons.append("探索位：相邻偏好")
+        pick["reasons"] = reasons
         if position < len(top):
             top[position] = pick
         else:
@@ -2148,7 +2160,9 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     # long a newly imported library item can remain visible in recommendations.
     # Looking this up first is what makes a normal page visit a real cache hit.
     fast_cache_key = json.dumps({
-        "kind": "request-v2",
+        "kind": "request-v3",
+        "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
+        "actor_alias_revision": actor_alias_revision(),
         "config": config,
         "ignored": sorted(feedback["ignored_codes"]),
         "liked": sorted(feedback["liked_codes"]),
@@ -2168,6 +2182,8 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     profile = await _library_profile()
     live_codes, live_warning = await _live_library_codes(config, force=bool(payload.get("refresh")))
     cache_key = json.dumps({
+        "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
+        "actor_alias_revision": actor_alias_revision(),
         "config": config,
         "ignored": sorted(feedback["ignored_codes"]),
         "liked": sorted(feedback["liked_codes"]),
