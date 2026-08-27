@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, clear_preference_events, preference_behavior_summary, record_preference_event, semantic_tokens
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, semantic_tokens
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 22
-PERSONALIZED_MODEL_VERSION = "personal-v22"
+RECOMMENDATION_ALGORITHM_VERSION = 24
+PERSONALIZED_MODEL_VERSION = "personal-v24"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -825,6 +825,7 @@ def _mark_exposure_converted(store: dict[str, Any], code: Any, event_type: str =
     row["converted_rank"] = int(row.get("converted_rank") or row.get("last_rank") or 0)
     row["converted_routes"] = list(row.get("converted_routes") or row.get("last_routes") or [])
     row["converted_strategy"] = str(row.get("converted_strategy") or row.get("last_strategy") or "ranking")
+    row["converted_topic_ids"] = list(row.get("converted_topic_ids") or row.get("last_topic_ids") or [])
     history = [item for item in (row.get("conversion_history") or []) if isinstance(item, dict)]
     history.append({"stage": event_type, "value": value, "at": now})
     row["conversion_history"] = history[-12:]
@@ -901,6 +902,26 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
         strategies[strategy] = strategy_evidence
         row["last_strategy"] = strategy
         row["exploration_kind"] = str(item.get("exploration_kind") or "")[:64]
+        topic = item.get("interest_topic") or item.get("interest_topic_hypothesis") or {}
+        topic_id = str(topic.get("id") or "")[:64] if isinstance(topic, dict) else ""
+        topic_confidence = float(topic.get("confidence") or 0) if isinstance(topic, dict) else 0.0
+        topic_support = int(topic.get("support") or 0) if isinstance(topic, dict) else 0
+        topic_ids: list[str] = []
+        if topic_id and topic_confidence >= 0.35 and topic_support >= 2:
+            topic_evidence = row.setdefault("topics", {})
+            evidence = topic_evidence.get(topic_id) if isinstance(topic_evidence.get(topic_id), dict) else {}
+            evidence.update({
+                "label": str(topic.get("label") or topic_id)[:160],
+                "batch_count": int(evidence.get("batch_count") or 0) + 1,
+                "first_seen_at": int(evidence.get("first_seen_at") or now),
+                "last_seen_at": now,
+                "last_rank": max(0, int(item.get("rank") or 0)),
+                "confidence": round(topic_confidence, 3),
+                "support": topic_support,
+            })
+            topic_evidence[topic_id] = evidence
+            topic_ids.append(topic_id)
+        row["last_topic_ids"] = topic_ids
         model_version = str(item.get("model_version") or "unknown")[:64]
         rank = max(0, int(item.get("rank") or 0))
         score_value = float(item.get("score") or 0)
@@ -1104,6 +1125,48 @@ def _exploration_evaluation(store: dict[str, Any], *, now_ms: int | None = None)
             "reliability": round(exposed / (exposed + 20), 3),
         })
     return {"cohorts": cohorts, "minimum_adaptation_sample": 20, "prior": {"alpha": 2, "beta": 8}, "generated_at": now_ms}
+
+
+def _topic_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    """Evaluate eligible topic hypotheses after conversion or seven-day maturity."""
+    now_ms = int(now_ms or _now_ms())
+    mature_age_ms = 7 * 86400 * 1000
+    topics: dict[str, dict[str, Any]] = {}
+    eligible = 0
+    for row in (store.get("exposures") or {}).values():
+        if not isinstance(row, dict):
+            continue
+        value = _conversion_value(row)
+        if value <= 0 and now_ms - int(row.get("first_seen_at") or now_ms) < mature_age_ms:
+            continue
+        eligible += 1
+        converted_topic_ids = set(row.get("converted_topic_ids") or []) if value > 0 else set()
+        observed_topic_ids = {str(topic_id) for topic_id, evidence in (row.get("topics") or {}).items() if isinstance(evidence, dict)}
+        credited = converted_topic_ids & observed_topic_ids
+        share = 1 / max(1, len(credited))
+        for topic_id, evidence in (row.get("topics") or {}).items():
+            if not isinstance(evidence, dict):
+                continue
+            metric = topics.setdefault(str(topic_id), {"label": evidence.get("label") or topic_id, "exposed": 0, "impressions": 0, "conversion_value_sum": 0.0, "converted": 0.0})
+            metric["exposed"] += 1
+            metric["impressions"] += int(evidence.get("batch_count") or 0)
+            if topic_id in credited:
+                metric["conversion_value_sum"] += value * share
+                metric["converted"] += share if value >= QUALIFIED_CONVERSION_THRESHOLD else 0.0
+    total_exposed = sum(int(metric["exposed"]) for metric in topics.values())
+    for metric in topics.values():
+        exposed = int(metric["exposed"])
+        posterior = (float(metric["conversion_value_sum"]) + 1) / (exposed + 6)
+        uncertainty = math.sqrt(max(0.0, posterior * (1 - posterior)) / max(exposed + 6, 1))
+        metric.update({
+            "posterior_rate": round(posterior, 4),
+            "reliability": round(exposed / (exposed + 15), 3),
+            "underexposure": round(1 / math.sqrt(exposed + 1), 4),
+            "ucb": round(min(1.0, posterior + 1.28 * uncertainty), 4),
+            "weight": round(max(0.85, min(1.15, 1 + (posterior - 1 / 6) * (exposed / (exposed + 15)))), 3) if exposed >= 15 else 1.0,
+            "adaptation_status": "active" if exposed >= 15 else "observing",
+        })
+    return {"topics": topics, "eligible": eligible, "total_exposed": total_exposed, "minimum_adaptation_sample": 15, "prior": {"alpha": 1, "beta": 5}, "generated_at": now_ms}
 
 
 def _negative_neighbor_seed_weights(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, float]:
@@ -2166,6 +2229,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     outcome_model: dict[str, Any] = feedback.get("outcome_model") or {}
     route_weights: dict[str, float] = feedback.get("route_weights") or {}
     interest_topics: list[dict[str, Any]] = feedback.get("interest_topics") or []
+    topic_weights: dict[str, float] = feedback.get("topic_weights") or {}
     exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
@@ -2350,7 +2414,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             reasons.append("近期题材兴趣上升")
 
     candidate_actor_ids = set(actor_identities)
-    candidate_categories = set(categories)
+    candidate_categories = {canonical_preference_category(category) for category in categories if canonical_preference_category(category)}
     for topic in interest_topics:
         if not isinstance(topic, dict):
             continue
@@ -2372,11 +2436,16 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             matched_interest_topic = {
                 "id": topic.get("id"),
                 "label": topic.get("label"),
+                "confidence": round(confidence, 3),
+                "support": int(topic.get("support") or 0),
                 "actor_matches": sorted(actor_matches),
                 "category_matches": sorted(category_matches),
                 "score": round(topic_score, 2),
                 "momentum": round(momentum, 4),
             }
+    interest_topic_hypothesis = dict(matched_interest_topic or {})
+    if matched_interest_topic:
+        interest_topic_score *= float(topic_weights.get(str(matched_interest_topic.get("id") or "")) or 1.0)
     if interest_topic_score >= 0.5 and matched_interest_topic:
         score += interest_topic_score
         personalized_score += interest_topic_score
@@ -2674,6 +2743,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "outcome_calibration": round(outcome_calibration_score, 1),
         "route_calibration": round(route_calibration_score, 1),
         "interest_topic": matched_interest_topic or {},
+        "interest_topic_hypothesis": interest_topic_hypothesis,
         "neighbor_score": round(neighbor_score, 3),
         "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
         "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
@@ -3077,6 +3147,7 @@ def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str
     exposed_actors: Counter = Counter()
     exposed_categories: Counter = Counter()
     exposed_makers: Counter = Counter()
+    topic_metrics = ((config.get("_topic_evaluation") or {}).get("topics") or {}) if isinstance(config.get("_topic_evaluation"), dict) else {}
     for item in top:
         exposed_actors.update(set(actor_identity_key(name) for name in item.get("actors") or [] if actor_identity_key(name)))
         exposed_categories.update(set(str(name) for name in item.get("categories") or [] if _generic_category_factor(name) >= 0.5))
@@ -3102,23 +3173,48 @@ def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str
         category_overlap = sum(min(4, exposed_categories.get(str(name), 0)) for name in set(item.get("categories") or []) if _generic_category_factor(name) >= 0.5)
         maker = _norm_key(_name_one(item.get("maker")))
         exposure_penalty = actor_overlap * 2.5 + category_overlap * 0.35 + (exposed_makers.get(maker, 0) * 1.8 if maker else 0)
-        return personalized * 0.4 + actionable * 0.18 + actor_novelty * 4 + relation_confidence * 5 + uncertainty * 3 + freshness * 3 + portrait_quality * 2 + jitter - exposure_penalty
+        hypothesis = item.get("interest_topic_hypothesis") if isinstance(item.get("interest_topic_hypothesis"), dict) else {}
+        topic_id = str(hypothesis.get("id") or "")
+        topic_confidence = float(hypothesis.get("confidence") or 0)
+        topic_support = int(hypothesis.get("support") or 0)
+        topic_metric = topic_metrics.get(topic_id) if isinstance(topic_metrics.get(topic_id), dict) else {}
+        topic_bonus = 0.0
+        if topic_id and topic_confidence >= 0.35 and topic_support >= 2:
+            topic_bonus = topic_confidence * (2 + float(topic_metric.get("underexposure") or 1) * 3 + float(topic_metric.get("ucb") or 0.35) * 2)
+        return personalized * 0.4 + actionable * 0.18 + actor_novelty * 4 + relation_confidence * 5 + uncertainty * 3 + freshness * 3 + portrait_quality * 2 + topic_bonus + jitter - exposure_penalty
 
     eligible = [
         item for item in items[limit:]
         if float(item.get("personalized_score") or 0) >= 6
         and (float(item.get("neighbor_confidence") or 0) >= 0.35 or float(item.get("actionability_score") or 0) >= 5)
     ]
-    pool = sorted(eligible or items[limit:], key=exploration_value, reverse=True)
-    picks = pool[:exploration_count]
+    pool = list(eligible or items[limit:])
+    picks: list[dict[str, Any]] = []
+    picked_topics: Counter = Counter()
+    while pool and len(picks) < exploration_count:
+        def selection_value(item: dict[str, Any]) -> float:
+            hypothesis = item.get("interest_topic_hypothesis") if isinstance(item.get("interest_topic_hypothesis"), dict) else {}
+            topic_id = str(hypothesis.get("id") or "")
+            return exploration_value(item) - picked_topics.get(topic_id, 0) * 4 if topic_id else exploration_value(item)
+        pick = max(pool, key=selection_value)
+        pool.remove(pick)
+        picks.append(pick)
+        hypothesis = pick.get("interest_topic_hypothesis") if isinstance(pick.get("interest_topic_hypothesis"), dict) else {}
+        topic_id = str(hypothesis.get("id") or "")
+        if topic_id and float(hypothesis.get("confidence") or 0) >= 0.35 and int(hypothesis.get("support") or 0) >= 2:
+            picked_topics[topic_id] += 1
     step = max(1, round(limit / (len(picks) + 1)))
     position = step
     for pick in picks:
         pick["is_exploration"] = True
-        pick["exploration_kind"] = "uncertainty-aware"
+        hypothesis = pick.get("interest_topic_hypothesis") if isinstance(pick.get("interest_topic_hypothesis"), dict) else {}
+        topic_eligible = bool(hypothesis.get("id")) and float(hypothesis.get("confidence") or 0) >= 0.35 and int(hypothesis.get("support") or 0) >= 2
+        pick["exploration_kind"] = "topic-bandit" if topic_eligible else "uncertainty-aware"
+        pick["exploration_topic_id"] = str(hypothesis.get("id") or "") if topic_eligible else ""
         reasons = pick.get("reasons") if isinstance(pick.get("reasons"), list) else []
-        if "探索位：可信的新方向" not in reasons:
-            reasons.append("探索位：可信的新方向")
+        exploration_reason = f"探索位：验证主题 {hypothesis.get('label')}" if topic_eligible else "探索位：可信的新方向"
+        if exploration_reason not in reasons:
+            reasons.append(exploration_reason)
         pick["reasons"] = reasons
         if position < len(top):
             top[position] = pick
@@ -3139,6 +3235,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     model_selection = _select_ranking_model(config, store)
     route_evaluation = _route_evaluation(store)
     exploration_evaluation = _exploration_evaluation(store)
+    topic_evaluation = _topic_evaluation(store)
     feedback = {
         "ignored_codes": _feedback_codes(store.get("ignored")),
         "liked_codes": _feedback_codes(store.get("liked")),
@@ -3154,6 +3251,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "trend_categories": dict((((behavior.get("trends") or {}).get("categories") or {}).get("deltas") or {})),
         "outcome_model": behavior.get("outcomes") or {},
         "interest_topics": list((behavior.get("interest_topics") or {}).get("topics") or []),
+        "topic_weights": {topic_id: float(metric.get("weight") or 1) for topic_id, metric in (topic_evaluation.get("topics") or {}).items()},
         "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
         "exposure_penalties": _exposure_penalties(store),
     }
@@ -3169,6 +3267,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "ranking_model": model_selection["version"],
         "actor_alias_revision": actor_alias_revision(),
         "behavior_revision": behavior.get("revision"),
+        "interest_topic_revision": (behavior.get("interest_topics") or {}).get("revision"),
         "config": config,
         "ignored": sorted(feedback["ignored_codes"]),
         "liked": sorted(feedback["liked_codes"]),
@@ -3179,6 +3278,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "disliked_categories": dict(feedback["disliked_categories"]),
         "exposure_penalties": feedback["exposure_penalties"],
         "route_weights": feedback["route_weights"],
+        "topic_weights": feedback["topic_weights"],
         "source_mode": source_mode,
         "requested_limit": requested_limit,
     }, sort_keys=True, ensure_ascii=False)
@@ -3203,6 +3303,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "ranking_model": model_selection["version"],
         "actor_alias_revision": actor_alias_revision(),
         "behavior_revision": behavior.get("revision"),
+        "interest_topic_revision": (behavior.get("interest_topics") or {}).get("revision"),
         "config": config,
         "ignored": sorted(feedback["ignored_codes"]),
         "liked": sorted(feedback["liked_codes"]),
@@ -3213,6 +3314,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "disliked_categories": dict(feedback["disliked_categories"]),
         "exposure_penalties": feedback["exposure_penalties"],
         "route_weights": feedback["route_weights"],
+        "topic_weights": feedback["topic_weights"],
         "library_codes": sorted(live_codes),
         "library_code_count": len(profile.get("codes") or []),
         "library_code_fingerprint": _code_fingerprint(profile.get("codes") or set()),
@@ -3337,6 +3439,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     diversified_head = await asyncio.to_thread(_diversify_recommendations, scored[:diversify_window])
     scored = diversified_head + scored[diversify_window:]
     controls_config = dict(config)
+    controls_config["_topic_evaluation"] = topic_evaluation
     if config.get("adaptive_exploration_enabled", True):
         mature_route_samples = int(route_evaluation.get("eligible") or 0)
         adaptive_ratio = 0.08 if media_count >= 100 and mature_route_samples >= 30 else 0.1 if media_count >= 30 else 0.14
@@ -3394,6 +3497,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "model_evaluation": _model_evaluation(store),
             "route_evaluation": route_evaluation,
             "exploration_evaluation": exploration_evaluation,
+            "topic_evaluation": topic_evaluation,
             "exploration": {
                 "adaptive": bool(config.get("adaptive_exploration_enabled", True)),
                 "ratio": round(float(controls_config.get("exploration_ratio") or 0), 3),
