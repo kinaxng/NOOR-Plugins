@@ -45,8 +45,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 18
-PERSONALIZED_MODEL_VERSION = "personal-v18"
+RECOMMENDATION_ALGORITHM_VERSION = 19
+PERSONALIZED_MODEL_VERSION = "personal-v19"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -1012,6 +1012,24 @@ def _negative_neighbor_seed_weights(store: dict[str, Any], *, now_ms: int | None
         age_days = max(0.0, (now_ms - int(item.get("created_at") or now_ms)) / 86400 / 1000)
         weights[code] = max(weights.get(code, 0.0), max(0.25, math.pow(0.5, age_days / 180)))
     return weights
+
+
+def _positive_neighbor_seed_weights(profile: dict[str, Any], behavior: dict[str, Any], store: dict[str, Any]) -> tuple[dict[str, float], dict[str, int]]:
+    weights = {_norm_code(code): max(0.05, float(weight)) for code, weight in (profile.get("code_weights") or {}).items() if _norm_code(code)}
+    sources = {"library": len(weights), "behavior": 0, "liked": 0}
+    for raw_code, raw_weight in (behavior.get("codes") or {}).items():
+        code = _norm_code(raw_code)
+        if not code:
+            continue
+        weight = min(3.0, max(0.05, float(raw_weight or 0)))
+        weights[code] = max(weights.get(code, 0.0), weight)
+        sources["behavior"] += 1
+    for row in store.get("liked") or []:
+        code = _norm_code(row.get("code") if isinstance(row, dict) else row)
+        if code:
+            weights[code] = max(weights.get(code, 0.0), 2.0)
+            sources["liked"] += 1
+    return weights, sources
 
 
 def _select_ranking_model(config: dict[str, Any], store: dict[str, Any]) -> dict[str, str]:
@@ -2356,7 +2374,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         reasons.append("近期查看意向")
     neighbor_score = float(item.get("neighbor_score") or 0)
     if neighbor_score > 0:
-        route_factor = float(route_weights.get("core-neighbor") or 1.0)
+        graph_recall = int(item.get("neighbor_hop_count") or 1) > 1
+        route_factor = float(route_weights.get("core-graph" if graph_recall else "core-neighbor") or 1.0)
         boost = min(14, math.log2(1 + neighbor_score) * 5.2 * route_factor)
         score += boost
         personalized_score += boost
@@ -2368,7 +2387,10 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
                 label = str(reason.get("label") or "").strip() if isinstance(reason, dict) else ""
                 if label and label not in labels:
                     labels.append(label)
-        reasons.insert(min(2, len(reasons)), "邻域相似" + ("：" + "/".join(labels[:3]) if labels else ""))
+        hop_count = int(item.get("neighbor_hop_count") or 1)
+        via_codes = list(dict.fromkeys(str(row.get("via_code") or "").strip() for row in evidence_rows if str(row.get("via_code") or "").strip()))
+        relation_reason = "图谱传播" + ("：经 " + "/".join(via_codes[:2]) if hop_count > 1 and via_codes else "") if hop_count > 1 else "邻域相似" + ("：" + "/".join(labels[:3]) if labels else "")
+        reasons.insert(min(2, len(reasons)), relation_reason)
     neighbor_negative_score = float(item.get("neighbor_negative_score") or 0)
     if neighbor_negative_score > 0:
         penalty = min(12, math.log2(1 + neighbor_negative_score) * 5.5)
@@ -2502,6 +2524,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "neighbor_score": round(neighbor_score, 3),
         "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
         "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
+        "neighbor_hop_count": int(item.get("neighbor_hop_count") or 1),
         "neighbor_negative_score": round(neighbor_negative_score, 3),
         "neighbor_negative_evidence": list(item.get("neighbor_negative_evidence") or [])[:3],
         "recall_sources": recall_sources,
@@ -3004,11 +3027,13 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
 
     try:
         from app.knowledge.intelligence import work_similarity_candidates
+        graph_seed_weights, graph_seed_sources = _positive_neighbor_seed_weights(profile, behavior, store)
         similarity_meta = await work_similarity_candidates(
-            profile.get("code_weights") or {code: 1.0 for code in profile.get("codes") or set()},
+            graph_seed_weights or {code: 1.0 for code in profile.get("codes") or set()},
             negative_seed_weights=_negative_neighbor_seed_weights(store),
             limit=160,
         )
+        similarity_meta["seed_sources"] = graph_seed_sources
         by_code = {_candidate_code(item): item for item in candidates if _candidate_code(item)}
         for neighbor in similarity_meta.get("items") or []:
             code = _candidate_code(neighbor)
@@ -3017,23 +3042,29 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             existing = by_code.get(code)
             if existing is None:
                 existing = dict(neighbor)
-                existing["source_tags"] = [{"id": "intelligence-neighbor", "label": "Core 邻域"}]
-                existing["recall_sources"] = ["core-neighbor"]
+                graph_recall = int(neighbor.get("neighbor_hop_count") or 1) > 1
+                existing["source_tags"] = [{"id": "intelligence-graph" if graph_recall else "intelligence-neighbor", "label": "Core 图传播" if graph_recall else "Core 邻域"}]
+                existing["recall_sources"] = ["core-graph" if graph_recall else "core-neighbor"]
                 candidates.append(existing)
                 by_code[code] = existing
             else:
                 existing["neighbor_score"] = neighbor.get("neighbor_score")
                 existing["neighbor_confidence"] = neighbor.get("neighbor_confidence")
                 existing["neighbor_evidence"] = neighbor.get("neighbor_evidence") or []
+                existing["neighbor_hop_count"] = neighbor.get("neighbor_hop_count") or 1
                 existing["neighbor_negative_score"] = neighbor.get("neighbor_negative_score")
                 existing["neighbor_negative_evidence"] = neighbor.get("neighbor_negative_evidence") or []
-                existing["recall_sources"] = list(dict.fromkeys([*(existing.get("recall_sources") or []), "core-neighbor"]))
+                graph_recall = int(neighbor.get("neighbor_hop_count") or 1) > 1
+                route_id = "core-graph" if graph_recall else "core-neighbor"
+                tag_id = "intelligence-graph" if graph_recall else "intelligence-neighbor"
+                tag_label = "Core 图传播" if graph_recall else "Core 邻域"
+                existing["recall_sources"] = list(dict.fromkeys([*(existing.get("recall_sources") or []), route_id]))
                 for key in ("actors", "categories", "maker", "series", "director", "cover_url", "image_candidates", "release_date", "field_sources", "completeness"):
                     if not existing.get(key) and neighbor.get(key):
                         existing[key] = neighbor[key]
                 tags = list(existing.get("source_tags") or [])
-                if not any(str(tag.get("id") or "") == "intelligence-neighbor" for tag in tags if isinstance(tag, dict)):
-                    tags.append({"id": "intelligence-neighbor", "label": "Core 邻域"})
+                if not any(str(tag.get("id") or "") == tag_id for tag in tags if isinstance(tag, dict)):
+                    tags.append({"id": tag_id, "label": tag_label})
                 existing["source_tags"] = tags
         similarity_meta["profile_gaps"] = Counter(gap for neighbor in (similarity_meta.get("items") or []) for gap in _candidate_profile_gaps(neighbor))
         similarity_meta["profile_enrichment_queued"] = _queue_profile_enrichment(config, [neighbor for neighbor in (similarity_meta.get("items") or []) if _candidate_profile_gaps(neighbor)])
@@ -3141,9 +3172,13 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "candidates": len(similarity_meta.get("items") or []),
                 "linked_works": int(similarity_meta.get("linked_work_count") or 0),
                 "scored": sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0),
-                "selected": sum(1 for item in scored if "core-neighbor" in (item.get("recall_sources") or [])),
-                "core_only_selected": sum(1 for item in scored if (item.get("recall_sources") or []) == ["core-neighbor"]),
-                "feed_overlap_selected": sum(1 for item in scored if "core-neighbor" in (item.get("recall_sources") or []) and base_recall_source in (item.get("recall_sources") or [])),
+                "selected": sum(1 for item in scored if {"core-neighbor", "core-graph"} & set(item.get("recall_sources") or [])),
+                "direct_selected": sum(1 for item in scored if "core-neighbor" in (item.get("recall_sources") or [])),
+                "multi_hop_selected": sum(1 for item in scored if "core-graph" in (item.get("recall_sources") or [])),
+                "core_only_selected": sum(1 for item in scored if set(item.get("recall_sources") or []) in ({"core-neighbor"}, {"core-graph"})),
+                "feed_overlap_selected": sum(1 for item in scored if {"core-neighbor", "core-graph"} & set(item.get("recall_sources") or []) and base_recall_source in (item.get("recall_sources") or [])),
+                "propagation": dict(similarity_meta.get("propagation") or {}),
+                "seed_sources": dict(similarity_meta.get("seed_sources") or {}),
                 "average_confidence": round(sum(float(item.get("neighbor_confidence") or 0) for item in scored if float(item.get("neighbor_score") or 0) > 0) / max(1, sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0)), 3),
                 "profile_gaps": dict(similarity_meta.get("profile_gaps") or {}),
                 "profile_enrichment_queued": int(similarity_meta.get("profile_enrichment_queued") or 0),
