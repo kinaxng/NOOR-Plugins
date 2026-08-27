@@ -189,7 +189,10 @@ export async function mount(root, sdk) {
     error: '',
     data: null,
     activePanel: null,
+    resourceSync: { active: false, count: 0, updated: false },
   }
+  let resourcePoll = null
+  let resourceSyncing = false
 
   root.innerHTML = ''
   const page = el('div', 'av-rec-page')
@@ -272,7 +275,17 @@ export async function mount(root, sdk) {
       notice.textContent = state.error
       return
     }
-    const warnings = state.data?.warnings || []
+    if (state.resourceSync.active) {
+      notice.className = 'av-rec-notice is-loading'
+      notice.textContent = `正在后台补全 ${state.resourceSync.count} 部作品的资源情报，卡片会自动更新。`
+      return
+    }
+    if (state.resourceSync.updated) {
+      notice.className = 'av-rec-notice'
+      notice.textContent = '资源情报已完成增量更新。'
+      return
+    }
+    const warnings = (state.data?.warnings || []).filter(value => !/^正在后台补全\s*\d+/.test(String(value || '')))
     if (warnings.length) {
       notice.className = 'av-rec-notice is-warning'
       notice.textContent = warnings[0]
@@ -806,20 +819,65 @@ export async function mount(root, sdk) {
     renderItems()
   }
 
-  async function load(refresh = false) {
-    state.loading = true
+  function clearResourcePoll() {
+    if (resourcePoll?.clear) resourcePoll.clear()
+    resourcePoll = null
+  }
+
+  function scheduleResourcePoll(delay = 3500) {
+    clearResourcePoll()
+    resourcePoll = sdk.timers?.setTimeout
+      ? sdk.timers.setTimeout(() => syncBackgroundResources(), delay)
+      : { id: window.setTimeout(() => syncBackgroundResources(), delay), clear() { window.clearTimeout(this.id) } }
+  }
+
+  async function syncBackgroundResources() {
+    if (resourceSyncing) return
+    resourceSyncing = true
+    try {
+      const response = await sdk.api.get('/knowledge/resources/refresh/status', { timeout: 10000 })
+      const counts = response.data?.counts || {}
+      const count = Number(counts.queued || 0) + Number(counts.running || 0)
+      const wasActive = state.resourceSync.active
+      state.resourceSync.active = count > 0
+      state.resourceSync.count = count
+      renderNotice()
+      if (count > 0) {
+        scheduleResourcePoll()
+      } else if (wasActive) {
+        await load(false, true)
+        state.resourceSync.updated = true
+        renderNotice()
+        scheduleResourcePoll(12000)
+      }
+    } catch {
+      if (state.resourceSync.active) scheduleResourcePoll(6000)
+    } finally {
+      resourceSyncing = false
+    }
+  }
+
+  async function load(refresh = false, silent = false) {
+    if (!silent) state.loading = true
     state.error = ''
-    render()
+    if (!silent) render()
     try {
       const resp = await sdk.api.post('/plugins/av-recommend/actions/recommendations', {
         payload: { source_mode: state.sourceMode, limit: 60, refresh },
       }, { timeout: 90000 })
       state.data = resp.data
+      const queuedNotice = (state.data?.warnings || []).find(value => /^正在后台补全\s*\d+/.test(String(value || '')))
+      if (refresh && queuedNotice) {
+        state.resourceSync.active = true
+        state.resourceSync.updated = false
+        state.resourceSync.count = Number(String(queuedNotice).match(/\d+/)?.[0] || 0)
+      }
     } catch (e) {
       state.error = e?.response?.data?.detail || e?.message || '推荐加载失败'
     } finally {
-      state.loading = false
+      if (!silent) state.loading = false
       render()
+      await syncBackgroundResources()
     }
   }
 

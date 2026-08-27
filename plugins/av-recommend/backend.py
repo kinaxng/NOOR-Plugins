@@ -1927,7 +1927,7 @@ async def _enrich_recommendation_resources(
             queued = await enqueue_resource_refresh(pending_codes, priority=20)
         except Exception:
             queued = 0
-        warnings.append(f"资源确认已达 {budget_seconds:g} 秒页面预算，剩余 {len(pending)} 项已转入后台持续确认" if queued else f"资源确认已达 {budget_seconds:g} 秒页面预算，剩余 {len(pending)} 项将在稍后重试")
+        warnings.append(f"正在后台补全 {len(pending)} 部作品的资源情报" if queued else f"有 {len(pending)} 部作品的资源情报将在稍后重试")
     return warnings[:8]
 
 
