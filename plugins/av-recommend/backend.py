@@ -45,7 +45,9 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 8
+RECOMMENDATION_ALGORITHM_VERSION = 9
+PERSONALIZED_MODEL_VERSION = "personal-v9"
+STABLE_MODEL_VERSION = "stable-v1"
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
 _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
@@ -634,12 +636,15 @@ def _exposure_penalties(store: dict[str, Any], *, now_ms: int | None = None) -> 
     return penalties
 
 
-def _mark_exposure_converted(store: dict[str, Any], code: Any) -> bool:
+def _mark_exposure_converted(store: dict[str, Any], code: Any, event_type: str = "interaction") -> bool:
     canonical = _norm_code(code)
     row = (store.get("exposures") or {}).get(canonical)
     if not canonical or not isinstance(row, dict) or row.get("converted_at"):
         return False
     row["converted_at"] = _now_ms()
+    row["conversion_event"] = str(event_type or "interaction")[:64]
+    row["converted_model"] = str(row.get("last_model") or "unknown")
+    row["converted_rank"] = int(row.get("last_rank") or 0)
     return True
 
 
@@ -668,6 +673,22 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
             "actors": [str(value).strip() for value in (item.get("actors") or []) if str(value or "").strip()][:8],
             "categories": [str(value).strip() for value in (item.get("categories") or []) if str(value or "").strip()][:12],
         })
+        model_version = str(item.get("model_version") or "unknown")[:64]
+        rank = max(0, int(item.get("rank") or 0))
+        score_value = float(item.get("score") or 0)
+        models = row.setdefault("models", {})
+        model = models.get(model_version) if isinstance(models.get(model_version), dict) else {}
+        model.update({
+            "batch_count": int(model.get("batch_count") or 0) + 1,
+            "first_seen_at": int(model.get("first_seen_at") or now),
+            "last_seen_at": now,
+            "last_rank": rank,
+            "best_rank": min([value for value in (int(model.get("best_rank") or 0), rank) if value > 0] or [0]),
+            "score_sum": round(float(model.get("score_sum") or 0) + score_value, 3),
+        })
+        models[model_version] = model
+        row["last_model"] = model_version
+        row["last_rank"] = rank
         exposures[code] = row
         recorded += 1
     store["exposure_batches"] = [batch_id, *batches][:128]
@@ -678,6 +699,66 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
     retained.sort(key=lambda pair: int(pair[1].get("last_seen_at") or 0), reverse=True)
     store["exposures"] = dict(retained[:2000])
     return recorded
+
+
+def _wilson_interval(successes: int, trials: int) -> tuple[float, float]:
+    if trials <= 0:
+        return 0.0, 1.0
+    z = 1.96
+    rate = successes / trials
+    denominator = 1 + z * z / trials
+    center = (rate + z * z / (2 * trials)) / denominator
+    margin = z * math.sqrt((rate * (1 - rate) + z * z / (4 * trials)) / trials) / denominator
+    return max(0.0, center - margin), min(1.0, center + margin)
+
+
+def _model_evaluation(store: dict[str, Any]) -> dict[str, Any]:
+    models: dict[str, dict[str, Any]] = {}
+    for row in (store.get("exposures") or {}).values():
+        if not isinstance(row, dict):
+            continue
+        converted_model = str(row.get("converted_model") or "")
+        for version, evidence in (row.get("models") or {}).items():
+            if not isinstance(evidence, dict):
+                continue
+            metric = models.setdefault(str(version), {"exposed": 0, "impressions": 0, "converted": 0, "top10_converted": 0, "reciprocal_rank_sum": 0.0})
+            metric["exposed"] += 1
+            metric["impressions"] += int(evidence.get("batch_count") or 0)
+            if converted_model == version:
+                rank = int(row.get("converted_rank") or evidence.get("last_rank") or 0)
+                metric["converted"] += 1
+                metric["top10_converted"] += int(0 < rank <= 10)
+                metric["reciprocal_rank_sum"] += 1 / rank if rank > 0 else 0
+    for metric in models.values():
+        exposed = int(metric["exposed"])
+        converted = int(metric["converted"])
+        lower, upper = _wilson_interval(converted, exposed)
+        metric.update({
+            "conversion_rate": round(converted / max(exposed, 1), 4),
+            "conversion_interval": {"lower": round(lower, 4), "upper": round(upper, 4)},
+            "top10_rate": round(int(metric["top10_converted"]) / max(converted, 1), 4),
+            "mrr": round(float(metric.pop("reciprocal_rank_sum")) / max(converted, 1), 4),
+        })
+    return {"models": models, "minimum_comparison_sample": 30, "generated_at": _now_ms()}
+
+
+def _select_ranking_model(config: dict[str, Any], store: dict[str, Any]) -> dict[str, str]:
+    requested = str(store.get("ranking_model_override") or config.get("ranking_model_policy") or "auto").strip().lower()
+    if requested in {"personal", "personalized"}:
+        return {"policy": "personal", "version": PERSONALIZED_MODEL_VERSION, "mode": "manual", "reason": "已手动选择个性化模型"}
+    if requested == "stable":
+        return {"policy": "stable", "version": STABLE_MODEL_VERSION, "mode": "manual", "reason": "已手动回退稳定模型"}
+    evaluation = _model_evaluation(store).get("models") or {}
+    personal = evaluation.get(PERSONALIZED_MODEL_VERSION) or {}
+    stable = evaluation.get(STABLE_MODEL_VERSION) or {}
+    if int(personal.get("exposed") or 0) >= 50 and float((personal.get("conversion_interval") or {}).get("upper") or 1) < 0.05:
+        return {"policy": "stable", "version": STABLE_MODEL_VERSION, "mode": "auto", "reason": "个性化模型转化置信上界低于安全线"}
+    if int(personal.get("exposed") or 0) >= 30 and int(stable.get("exposed") or 0) >= 30:
+        personal_upper = float((personal.get("conversion_interval") or {}).get("upper") or 1)
+        stable_lower = float((stable.get("conversion_interval") or {}).get("lower") or 0)
+        if personal_upper < stable_lower:
+            return {"policy": "stable", "version": STABLE_MODEL_VERSION, "mode": "auto", "reason": "稳定模型转化区间显著更优"}
+    return {"policy": "personal", "version": PERSONALIZED_MODEL_VERSION, "mode": "auto", "reason": "个性化模型处于安全区间"}
 
 
 def _text_has_subtitle(value: Any) -> bool:
@@ -1971,6 +2052,14 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         score += 10
         reasons.insert(0, "洗版：" + " / ".join(improved[:3]))
 
+    if str(config.get("_ranking_policy") or "personal") == "stable":
+        policy_adjustment = relationship_preference_score * 0.45 + semantic_preference_score * 0.3 + outcome_calibration_score
+        score -= policy_adjustment
+        personalized_score -= policy_adjustment
+        relationship_preference_score *= 0.55
+        semantic_preference_score *= 0.7
+        outcome_calibration_score = 0.0
+
     score = max(0, min(92, round(score)))
     if score <= 0:
         _record_filter(diagnostics, item, code, "score_too_low", "综合评分小于等于 0")
@@ -2322,6 +2411,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     if source_mode not in {"latest", "full"}:
         source_mode = "latest"
     store = _ensure_store()
+    model_selection = _select_ranking_model(config, store)
     behavior = await preference_behavior_summary()
     feedback = {
         "ignored_codes": _feedback_codes(store.get("ignored")),
@@ -2346,6 +2436,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     fast_cache_key = json.dumps({
         "kind": "request-v3",
         "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
+        "ranking_model": model_selection["version"],
         "actor_alias_revision": actor_alias_revision(),
         "behavior_revision": behavior.get("revision"),
         "config": config,
@@ -2369,10 +2460,11 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     cold_start_threshold = max(5, min(int(config.get("cold_start_min_library_size") or 20), 100))
     media_count = int(profile.get("media_count") or 0)
     cold_start_strength = max(0.0, min(1.0, 1 - media_count / cold_start_threshold)) if config.get("adaptive_cold_start_enabled", True) else 0.0
-    scoring_config = {**config, "_cold_start_strength": cold_start_strength}
+    scoring_config = {**config, "_cold_start_strength": cold_start_strength, "_ranking_policy": model_selection["policy"]}
     live_codes, live_warning = await _live_library_codes(config, force=bool(payload.get("refresh")))
     cache_key = json.dumps({
         "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
+        "ranking_model": model_selection["version"],
         "actor_alias_revision": actor_alias_revision(),
         "behavior_revision": behavior.get("revision"),
         "config": config,
@@ -2448,6 +2540,9 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     if cold_start_strength > 0:
         controls_config["exploration_ratio"] = max(float(config.get("exploration_ratio") or 0), 0.1 + cold_start_strength * 0.1)
     scored = _apply_recommendation_controls(scored, controls_config, requested_limit)
+    for rank, item in enumerate(scored, 1):
+        item["recommendation_rank"] = rank
+        item["model_version"] = model_selection["version"]
     # Diversification can promote candidates that were outside the first-pass
     # window. Confirm the cards that will actually be displayed as a second
     # pass, skipping rows already enriched above.
@@ -2459,6 +2554,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "generated_at": _now_ms(),
         "source_mode": source_mode,
         "source_label": "完整推荐" if source_mode == "full" else "最新推荐",
+        "model": model_selection,
         "items": scored,
         "total": len(scored),
         "profile": {
@@ -2481,6 +2577,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "ignored": len([x for x in feedback["ignored_codes"] if x]),
             "disliked": len([x for x in feedback["disliked_codes"] if x]),
             "cold_start": {"active": cold_start_strength > 0, "strength": round(cold_start_strength, 3), "threshold": cold_start_threshold},
+            "model_evaluation": _model_evaluation(store),
         },
         "candidate_meta": {"pool": _candidate_pool_stats(pool)},
         "filtered": _filtered_summary(filtered_diagnostics),
@@ -2568,7 +2665,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         }
         data[key] = [x for x in data.get(key, []) if _norm_code(x.get("code") if isinstance(x, dict) else x) != code]
         data[key].insert(0, row)
-        _mark_exposure_converted(data, code)
+        _mark_exposure_converted(data, code, f"feedback:{kind}")
         _save_store(data)
         _invalidate_recommendation_cache()
         return {"ok": True, "code": code, "kind": kind}
@@ -2582,7 +2679,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
             data=payload.get("data") if isinstance(payload.get("data"), dict) else {},
         )
         data = _ensure_store()
-        converted = _mark_exposure_converted(data, payload.get("code"))
+        converted = _mark_exposure_converted(data, payload.get("code"), str(payload.get("event_type") or "interaction"))
         if converted:
             _save_store(data)
         if created or converted:
@@ -2597,6 +2694,22 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
             if _exposure_penalties(data) != before:
                 _invalidate_recommendation_cache()
         return {"ok": True, "recorded": recorded}
+    if action == "model_evaluation":
+        data = _ensure_store()
+        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data)}
+    if action == "model_policy":
+        policy = str(payload.get("policy") or "auto").strip().lower()
+        if policy not in {"auto", "personal", "stable"}:
+            raise ValueError("模型策略仅支持 auto、personal 或 stable")
+        data = _ensure_store()
+        if policy == "auto":
+            data.pop("ranking_model_override", None)
+        else:
+            data["ranking_model_override"] = policy
+        _save_store(data)
+        _invalidate_recommendation_cache()
+        asyncio.create_task(_prewarm_recommendations(config, force=True, include_full=False))
+        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data)}
     if action == "reset_feedback":
         data = _ensure_store()
         data["ignored"] = []
@@ -2621,6 +2734,10 @@ def background_tasks(config: dict[str, Any] | None = None) -> list[dict[str, Any
     running = bool(background.get("running")) and not _candidate_pool_background_stale(pool, background)
     failed = bool(background.get("last_error"))
     status = "failed" if failed else ("running" if running else "idle")
+    store = _ensure_store()
+    selection = _select_ranking_model(config, store)
+    evaluation = _model_evaluation(store)
+    active_metrics = (evaluation.get("models") or {}).get(selection["version"]) or {}
     return [{
         "id": "av-recommend.candidate-pool",
         "title": "完整推荐候选池",
@@ -2643,4 +2760,13 @@ def background_tasks(config: dict[str, Any] | None = None) -> list[dict[str, Any
         "summary": f"提前生成最新推荐与完整推荐 · 缓存 {_config_number(config, 'recommendation_cache_minutes', 30, 5, 1440):g} 分钟",
         "detail": _prewarm_state.get("last_error") or ("已预热：" + "、".join(_prewarm_state.get("modes") or []) if _prewarm_state.get("modes") else "等待首次预热"),
         "metrics": {"modes": list(_prewarm_state.get("modes") or [])},
+    }, {
+        "id": "av-recommend.model-safety",
+        "title": "推荐模型安全评估",
+        "status": "idle",
+        "last_run_at": evaluation.get("generated_at"),
+        "last_finished_at": evaluation.get("generated_at"),
+        "summary": f"{selection['version']} · {int(active_metrics.get('exposed') or 0)} 个曝光样本",
+        "detail": selection["reason"],
+        "metrics": {"selection": selection, "evaluation": evaluation},
     }]

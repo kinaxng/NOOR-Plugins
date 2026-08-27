@@ -246,6 +246,7 @@ export async function mount(root, sdk) {
       ['候选', stats.candidates || 0, '本轮扫描'],
       ['推荐', data.total || 0, '综合排序'],
       ['候选池', fmtPool(stats.candidate_pool_total, stats.candidate_pool_today), state.sourceMode === 'full' ? '完整累计+今日' : '历史累计+今日'],
+      ['模型', data.model?.version || '-', data.model?.mode === 'auto' ? '自动保护' : '手动选择'],
     ]
     for (const [name, value, desc] of cards) {
       const card = el('div', 'av-rec-stat')
@@ -361,7 +362,14 @@ export async function mount(root, sdk) {
     sdk.api.post('/plugins/av-recommend/actions/exposure', {
       payload: {
         batch_id: `${exposureSession}:${exposureBatchSequence}`,
-        items: items.map(item => ({ code: item.code, actors: item.actors || [], categories: item.categories || [] })),
+        items: items.map(item => ({
+          code: item.code,
+          actors: item.actors || [],
+          categories: item.categories || [],
+          rank: item.recommendation_rank || 0,
+          score: item.score || 0,
+          model_version: item.model_version || state.data?.model?.version || 'unknown',
+        })),
       },
     }).catch(() => {})
   }
