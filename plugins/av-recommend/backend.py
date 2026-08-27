@@ -10,6 +10,7 @@ import math
 import re
 import time
 from collections import Counter, defaultdict
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -44,13 +45,15 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 3
+RECOMMENDATION_ALGORITHM_VERSION = 6
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
 _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
 _pool_lock = asyncio.Lock()
+_recommendation_generation_lock = asyncio.Lock()
 _scheduler_task: asyncio.Task[None] | None = None
 _scheduler_stop: asyncio.Event | None = None
+_prewarm_state: dict[str, Any] = {"status": "idle", "last_started_at": None, "last_finished_at": None, "last_error": "", "modes": []}
 
 
 def _recommendation_cache_id(cache_key: str) -> str:
@@ -996,6 +999,7 @@ async def _library_profile() -> dict[str, Any]:
         "title_terms": Counter(),
         "semantic_terms": Counter(),
         "actor_category": Counter(),
+        "category_pairs": Counter(),
         "local_features": {},
         "top_media": [],
     }
@@ -1024,6 +1028,7 @@ async def _library_profile() -> dict[str, Any]:
             "title_terms": Counter(),
             "semantic_terms": Counter(),
             "actor_category": Counter(),
+            "category_pairs": Counter(),
             "local_features": {},
             "top_media": [_entity_payload(item) for item in media[:8]],
         }
@@ -1045,7 +1050,9 @@ async def _library_profile() -> dict[str, Any]:
             "studios": set(),
         })
         semantic_work_weights: dict[str, float] = {}
-        for edge, target in rows.all():
+        for edge_index, (edge, target) in enumerate(rows.all()):
+            if edge_index and edge_index % 128 == 0:
+                await asyncio.sleep(0)
             rel = edge.relation_type
             if rel == "HAS_CODE":
                 code = _norm_code(target.label or target.key)
@@ -1076,6 +1083,9 @@ async def _library_profile() -> dict[str, Any]:
             for actor in rels["actors"]:
                 for category in rels["categories"]:
                     profile["actor_category"][(actor, category)] += weight
+            meaningful_categories = sorted(category for category in rels["categories"] if _generic_category_factor(category) >= 0.5)
+            for left, right in combinations(meaningful_categories[:12], 2):
+                profile["category_pairs"][(left, right)] += weight
         actor_names = {str(name) for name in profile["actors"] if str(name or "").strip()}
         semantic_actor_names = set(actor_names)
         semantic_actor_names.update(actor_alias_names())
@@ -1465,14 +1475,23 @@ async def _scheduler_loop() -> None:
             config = runtime.get_config(PLUGIN_ID)
             minutes = _scan_interval_minutes(config)
             enabled = config.get("full_scan_background_enabled", True)
+            scanned_pool = False
             if enabled and _pool_scan_due(_pool(), minutes):
                 await _scan_candidate_pool(config)
+                scanned_pool = True
+            await _prewarm_recommendations(
+                config,
+                force=bool(_prewarm_state.get("last_finished_at")),
+                include_full=scanned_pool,
+            )
+            cache_minutes = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440))
+            wake_minutes = max(4, min(minutes, int(cache_minutes * 0.8)))
         except asyncio.CancelledError:
             raise
         except Exception:
-            minutes = 30
+            wake_minutes = 10
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(_scheduler_stop.wait(), timeout=minutes * 60)
+            await asyncio.wait_for(_scheduler_stop.wait(), timeout=wake_minutes * 60)
 
 
 async def start_background(_config: dict[str, Any] | None = None) -> None:
@@ -1584,6 +1603,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     title_trait_counter: Counter = profile.get("title_traits") or Counter()
     semantic_term_counter: Counter = profile.get("semantic_terms") or Counter()
     actor_category_counter: Counter = profile.get("actor_category") or Counter()
+    category_pair_counter: Counter = profile.get("category_pairs") or Counter()
     media_count = max(int(profile.get("media_count") or 0), 1)
 
     actor_hits = [(name, actor_counter.get(identity, 0)) for name, identity in zip(actors, actor_identities) if actor_counter.get(identity, 0) > 0]
@@ -1696,12 +1716,12 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         reasons.append("近期互动题材")
 
     combo_hits = []
-    for actor in actors:
+    for actor, actor_identity in zip(actors, actor_identities):
         for category in categories:
             count = actor_category_counter.get((actor, category), 0)
             factor = _generic_category_factor(category)
             if count >= 2 and factor >= 0.5:
-                actor_count = max(actor_counter.get(actor, 0), 1)
+                actor_count = max(actor_counter.get(actor_identity, 0), 1)
                 category_count = max(_combined_category_count(category, genre_counter, tag_counter), 1)
                 expected = actor_count * category_count / media_count
                 lift = (count + 0.5) / (expected + 0.5)
@@ -1716,6 +1736,28 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             personalized_score += boost
             relationship_preference_score += boost
             reasons.append(f"组合偏好：{actor} + {category} · {count} 次 · 提升 {lift:.1f}×")
+
+    category_pair_hits = []
+    meaningful_categories = sorted(set(category for category in categories if _generic_category_factor(category) >= 0.5))
+    for left, right in combinations(meaningful_categories[:12], 2):
+        count = float(category_pair_counter.get((left, right)) or category_pair_counter.get((right, left)) or 0)
+        if count < 2:
+            continue
+        left_count = max(_combined_category_count(left, genre_counter, tag_counter), 1)
+        right_count = max(_combined_category_count(right, genre_counter, tag_counter), 1)
+        expected = left_count * right_count / media_count
+        lift = (count + 0.5) / (expected + 0.5)
+        if lift >= 1.3:
+            category_pair_hits.append((left, right, count, lift))
+    if category_pair_hits:
+        left, right, count, lift = max(category_pair_hits, key=lambda row: (math.log2(row[3]), row[2]))
+        support = 1 - math.exp(-(count - 1) / 2.5)
+        boost = min(8, max(0, math.log2(lift) - 0.3) * 3.5 * support + min(2, math.log2(count)))
+        if boost >= 1:
+            score += boost
+            personalized_score += boost
+            relationship_preference_score += boost
+            reasons.append(f"题材组合：{left} + {right} · 提升 {lift:.1f}×")
 
     # If the candidate has no familiar actor but several strong preferred tags,
     # mark it as a controlled discovery rather than letting it look random.
@@ -2101,7 +2143,7 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
         best_value = -9999.0
         for index, item in enumerate(remaining):
             value = float(item.get("score") or 0)
-            actors = [str(x) for x in item.get("actors") or []]
+            actors = [actor_identity_key(x) for x in item.get("actors") or []]
             categories = [str(x) for x in item.get("categories") or [] if _generic_category_factor(x) >= 0.5]
             actor_penalty = sum(actor_seen.get(actor, 0) for actor in actors[:3]) * 7
             category_penalty = sum(category_seen.get(category, 0) for category in categories[:3]) * 2
@@ -2113,7 +2155,7 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
         picked["diversity_rank"] = len(selected) + 1
         selected.append(picked)
         for actor in (picked.get("actors") or [])[:3]:
-            actor_seen[str(actor)] += 1
+            actor_seen[actor_identity_key(actor)] += 1
         for category in (picked.get("categories") or [])[:4]:
             if _generic_category_factor(category) >= 0.5:
                 category_seen[str(category)] += 1
@@ -2171,7 +2213,7 @@ def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str
     return top[:limit]
 
 
-async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     source_mode = str(payload.get("source_mode") or "latest").strip().lower()
     if source_mode not in {"latest", "full"}:
         source_mode = "latest"
@@ -2274,7 +2316,9 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
         warnings.append(live_warning)
     scored = []
     filtered_diagnostics: list[dict[str, Any]] = []
-    for item in candidates:
+    for candidate_index, item in enumerate(candidates):
+        if candidate_index and candidate_index % 64 == 0:
+            await asyncio.sleep(0)
         rec = _candidate_score(item, profile, config, feedback, filtered_diagnostics)
         if rec:
             scored.append(rec)
@@ -2329,6 +2373,30 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     _recommendation_cache_put(cache_key, result)
     _recommendation_cache_put(fast_cache_key, result)
     return result
+
+
+async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Single-flight recommendation generation shared by pages and prewarming."""
+    async with _recommendation_generation_lock:
+        return await _recommendations_unlocked(config, payload)
+
+
+async def _prewarm_recommendations(config: dict[str, Any], *, force: bool = False, include_full: bool = False) -> None:
+    """Keep the normal page variants warm before their persistent cache expires."""
+    started_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    _prewarm_state.update({"status": "running", "last_started_at": started_at, "last_error": "", "modes": []})
+    modes = ["latest"]
+    if include_full and _candidate_pool_stats(_pool()).get("total"):
+        modes.append("full")
+    try:
+        for source_mode in modes:
+            await _recommendations(config, {"source_mode": source_mode, "limit": 48, "refresh": force})
+            _prewarm_state["modes"] = [*_prewarm_state.get("modes", []), source_mode]
+        _prewarm_state.update({"status": "idle", "last_finished_at": dt.datetime.now(dt.timezone.utc).isoformat()})
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _prewarm_state.update({"status": "failed", "last_finished_at": dt.datetime.now(dt.timezone.utc).isoformat(), "last_error": str(exc)[:1000]})
 
 
 async def test(config: dict[str, Any]) -> PluginTestResult:
@@ -2434,4 +2502,13 @@ def background_tasks(config: dict[str, Any] | None = None) -> list[dict[str, Any
             "today_increment": stats["today_increment"],
             "interval_minutes": interval,
         },
+    }, {
+        "id": "av-recommend.snapshot-prewarm",
+        "title": "推荐快照预热",
+        "status": str(_prewarm_state.get("status") or "idle"),
+        "last_run_at": _prewarm_state.get("last_started_at"),
+        "last_finished_at": _prewarm_state.get("last_finished_at"),
+        "summary": f"提前生成最新推荐与完整推荐 · 缓存 {_config_number(config, 'recommendation_cache_minutes', 30, 5, 1440):g} 分钟",
+        "detail": _prewarm_state.get("last_error") or ("已预热：" + "、".join(_prewarm_state.get("modes") or []) if _prewarm_state.get("modes") else "等待首次预热"),
+        "metrics": {"modes": list(_prewarm_state.get("modes") or [])},
     }]
