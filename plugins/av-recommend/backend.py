@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 19
-PERSONALIZED_MODEL_VERSION = "personal-v19"
+RECOMMENDATION_ALGORITHM_VERSION = 20
+PERSONALIZED_MODEL_VERSION = "personal-v20"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -131,6 +131,28 @@ def _recommendation_cache_put(cache_key: str, value: dict[str, Any], *, source_m
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)
     _CACHE["entries"] = dict(data["entries"])
+
+
+def _latest_mode_snapshot(source_mode: str, requested_limit: int, *, max_age_seconds: int = 23400) -> dict[str, Any] | None:
+    """Return a bounded persisted snapshot without waiting for a generation lock."""
+    entries = _load_recommendation_cache().get("entries", {})
+    ranked = sorted(
+        (entry for entry in entries.values() if isinstance(entry, dict) and str(entry.get("source_mode") or "") == source_mode),
+        key=lambda entry: float(entry.get("ts") or 0),
+        reverse=True,
+    )
+    for entry in ranked:
+        age_seconds = max(0.0, time.time() - float(entry.get("ts") or 0))
+        value = entry.get("value")
+        if age_seconds > max_age_seconds or not isinstance(value, dict):
+            continue
+        result = copy.deepcopy(value)
+        items = result.get("items") if isinstance(result.get("items"), list) else []
+        result["items"] = items[:requested_limit]
+        result["total"] = len(result["items"])
+        result["cache_status"] = {"status": "stale", "age_seconds": round(age_seconds, 1), "refreshing": True}
+        return result
+    return None
 
 
 def _invalidate_recommendation_cache(*, modes: set[str] | None = None, hard: bool = True, reason: str = "changed") -> None:
@@ -2817,33 +2839,82 @@ async def _merge_cached_resource_intelligence(result: dict[str, Any]) -> dict[st
 
 
 def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep strong recommendations but avoid a front page monopolized by one actor/tag."""
+    """MMR-style reranking across stable actor, studio, series and topic identities."""
     remaining = list(items)
     selected: list[dict[str, Any]] = []
     actor_seen: Counter = Counter()
     category_seen: Counter = Counter()
+    maker_seen: Counter = Counter()
+    series_seen: Counter = Counter()
     while remaining:
         best_index = 0
         best_value = -9999.0
+        best_adjustment: dict[str, Any] = {}
         for index, item in enumerate(remaining):
-            value = float(item.get("score") or 0)
-            actors = [actor_identity_key(x) for x in item.get("actors") or []]
+            # The public score is intentionally capped, so retain a small part
+            # of the uncapped affinity to distinguish several 100-point rows.
+            value = float(item.get("score") or 0) + min(5.0, max(0.0, float(item.get("personalized_score") or 0)) * 0.06)
+            actors = list(dict.fromkeys(actor_identity_key(x) for x in item.get("actors") or [] if actor_identity_key(x)))
             categories = [str(x) for x in item.get("categories") or [] if _generic_category_factor(x) >= 0.5]
-            actor_penalty = sum(actor_seen.get(actor, 0) for actor in actors[:3]) * 7
-            category_penalty = sum(category_seen.get(category, 0) for category in categories[:3]) * 2
-            adjusted = value - actor_penalty - category_penalty
+            maker = _norm_key(_name_one(item.get("maker")))
+            series = _norm_key(_name_one(item.get("series")))
+            actor_penalty = sum(4.5 * math.sqrt(actor_seen.get(actor, 0)) for actor in actors[:4] if actor_seen.get(actor, 0))
+            category_penalty = sum(min(3, category_seen.get(category, 0)) * 1.15 for category in categories[:3])
+            maker_penalty = 2.75 * (maker_seen.get(maker, 0) ** 0.8) if maker else 0.0
+            series_penalty = 5.0 * series_seen.get(series, 0) if series else 0.0
+            penalty = actor_penalty + category_penalty + maker_penalty + series_penalty
+            adjusted = value - penalty
             if adjusted > best_value:
                 best_value = adjusted
                 best_index = index
+                best_adjustment = {
+                    "penalty": round(penalty, 2),
+                    "actor": round(actor_penalty, 2),
+                    "category": round(category_penalty, 2),
+                    "maker": round(maker_penalty, 2),
+                    "series": round(series_penalty, 2),
+                    "utility": round(adjusted, 2),
+                }
         picked = remaining.pop(best_index)
         picked["diversity_rank"] = len(selected) + 1
+        picked["diversity_adjustment"] = best_adjustment
         selected.append(picked)
         for actor in (picked.get("actors") or [])[:3]:
             actor_seen[actor_identity_key(actor)] += 1
         for category in (picked.get("categories") or [])[:4]:
             if _generic_category_factor(category) >= 0.5:
                 category_seen[str(category)] += 1
+        maker = _norm_key(_name_one(picked.get("maker")))
+        series = _norm_key(_name_one(picked.get("series")))
+        if maker:
+            maker_seen[maker] += 1
+        if series:
+            series_seen[series] += 1
     return selected
+
+
+def _recommendation_diversity_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
+    actor_counts: Counter = Counter()
+    maker_counts: Counter = Counter()
+    for item in items:
+        actor_counts.update(set(actor_identity_key(name) for name in item.get("actors") or [] if actor_identity_key(name)))
+        maker = _norm_key(_name_one(item.get("maker")))
+        if maker:
+            maker_counts[maker] += 1
+
+    def metrics(counter: Counter) -> dict[str, Any]:
+        total = sum(counter.values())
+        probabilities = [count / total for count in counter.values()] if total else []
+        effective = math.exp(-sum(value * math.log(value) for value in probabilities)) if probabilities else 0.0
+        maximum = max(counter.values(), default=0)
+        return {
+            "unique": len(counter),
+            "effective": round(effective, 1),
+            "max_count": maximum,
+            "max_share": round(maximum / max(len(items), 1), 3),
+        }
+
+    return {"actors": metrics(actor_counts), "makers": metrics(maker_counts)}
 
 
 def _shortlist_candidates(items: list[dict[str, Any]], profile: dict[str, Any], *, limit: int = 420) -> list[dict[str, Any]]:
@@ -2906,6 +2977,16 @@ def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str
         return items[:limit]
 
     seed = dt.date.today().isoformat()
+    top = items[:limit]
+    exposed_actors: Counter = Counter()
+    exposed_categories: Counter = Counter()
+    exposed_makers: Counter = Counter()
+    for item in top:
+        exposed_actors.update(set(actor_identity_key(name) for name in item.get("actors") or [] if actor_identity_key(name)))
+        exposed_categories.update(set(str(name) for name in item.get("categories") or [] if _generic_category_factor(name) >= 0.5))
+        maker = _norm_key(_name_one(item.get("maker")))
+        if maker:
+            exposed_makers[maker] += 1
 
     def exploration_value(item: dict[str, Any]) -> float:
         personalized = float(item.get("personalized_score") or 0)
@@ -2921,9 +3002,12 @@ def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str
         portrait_quality = sum(bool(completeness.get(key)) for key in ("title", "cover", "actors", "categories")) / 4 if completeness else 0.5
         digest = hashlib.sha256(f"{seed}:{item.get('code') or item.get('title') or ''}".encode("utf-8")).digest()
         jitter = int.from_bytes(digest[:2], "big") / 65535 * 2
-        return personalized * 0.4 + actionable * 0.18 + actor_novelty * 4 + relation_confidence * 5 + uncertainty * 3 + freshness * 3 + portrait_quality * 2 + jitter
+        actor_overlap = sum(exposed_actors.get(actor_identity_key(name), 0) for name in set(item.get("actors") or []))
+        category_overlap = sum(min(4, exposed_categories.get(str(name), 0)) for name in set(item.get("categories") or []) if _generic_category_factor(name) >= 0.5)
+        maker = _norm_key(_name_one(item.get("maker")))
+        exposure_penalty = actor_overlap * 2.5 + category_overlap * 0.35 + (exposed_makers.get(maker, 0) * 1.8 if maker else 0)
+        return personalized * 0.4 + actionable * 0.18 + actor_novelty * 4 + relation_confidence * 5 + uncertainty * 3 + freshness * 3 + portrait_quality * 2 + jitter - exposure_penalty
 
-    top = items[:limit]
     eligible = [
         item for item in items[limit:]
         if float(item.get("personalized_score") or 0) >= 6
@@ -3180,6 +3264,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     result = {
         "ok": True,
         "generated_at": _now_ms(),
+        "requested_limit": requested_limit,
         "source_mode": source_mode,
         "source_label": "完整推荐" if source_mode == "full" else "最新推荐",
         "model": model_selection,
@@ -3215,6 +3300,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "ratio": round(float(controls_config.get("exploration_ratio") or 0), 3),
                 "selected": sum(1 for item in scored if item.get("is_exploration")),
             },
+            "diversity": _recommendation_diversity_metrics(scored),
             "neighbor_recall": {
                 "seeds": int(similarity_meta.get("seed_count") or 0),
                 "negative_seeds": int(similarity_meta.get("negative_seed_count") or 0),
@@ -3266,6 +3352,11 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     """Single-flight each mode without letting full maintenance block latest."""
     source_mode = str(payload.get("source_mode") or "latest").strip().lower()
     lock = _recommendation_generation_locks["full" if source_mode == "full" else "latest"]
+    if lock.locked() and not payload.get("refresh"):
+        requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
+        snapshot = _latest_mode_snapshot(source_mode, requested_limit)
+        if snapshot is not None:
+            return snapshot
     async with lock:
         return await _recommendations_unlocked(config, payload)
 
