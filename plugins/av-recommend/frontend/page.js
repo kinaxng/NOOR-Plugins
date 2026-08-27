@@ -193,6 +193,13 @@ export async function mount(root, sdk) {
   }
   let resourcePoll = null
   let resourceSyncing = false
+  let exposureObserver = null
+  let exposureFlushTimer = null
+  let exposureBatchSequence = 0
+  const exposedCodes = new Set()
+  const exposureTimers = new Map()
+  const pendingExposures = new Map()
+  const exposureSession = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
 
   root.innerHTML = ''
   const page = el('div', 'av-rec-page')
@@ -343,6 +350,57 @@ export async function mount(root, sdk) {
     } catch (_) {
       // Behavior evidence must never block the user's primary action.
     }
+  }
+
+  function flushExposures() {
+    exposureFlushTimer = null
+    const items = Array.from(pendingExposures.values())
+    pendingExposures.clear()
+    if (!items.length) return
+    exposureBatchSequence += 1
+    sdk.api.post('/plugins/av-recommend/actions/exposure', {
+      payload: {
+        batch_id: `${exposureSession}:${exposureBatchSequence}`,
+        items: items.map(item => ({ code: item.code, actors: item.actors || [], categories: item.categories || [] })),
+      },
+    }).catch(() => {})
+  }
+
+  function queueExposure(item) {
+    const code = detailCode(item)
+    if (!code || exposedCodes.has(code)) return
+    exposedCodes.add(code)
+    pendingExposures.set(code, item)
+    if (exposureFlushTimer) return
+    exposureFlushTimer = window.setTimeout(flushExposures, 600)
+  }
+
+  function resetExposureObserver() {
+    exposureObserver?.disconnect?.()
+    exposureTimers.forEach(timer => window.clearTimeout(timer))
+    exposureTimers.clear()
+    if (typeof IntersectionObserver === 'undefined') {
+      exposureObserver = null
+      return
+    }
+    exposureObserver = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        const card = entry.target
+        const existing = exposureTimers.get(card)
+        if (!entry.isIntersecting || entry.intersectionRatio < 0.6) {
+          if (existing) window.clearTimeout(existing)
+          exposureTimers.delete(card)
+          return
+        }
+        if (existing || exposedCodes.has(detailCode(card.__recommendationItem))) return
+        const timer = window.setTimeout(() => {
+          exposureTimers.delete(card)
+          queueExposure(card.__recommendationItem)
+          exposureObserver?.unobserve?.(card)
+        }, 1200)
+        exposureTimers.set(card, timer)
+      })
+    }, { threshold: [0.6] })
   }
 
   function openDislikePicker(item) {
@@ -748,6 +806,7 @@ export async function mount(root, sdk) {
 
   function renderItems() {
     if (state.loading && !state.data) return skeleton()
+    resetExposureObserver()
     grid.innerHTML = ''
     const items = state.data?.items || []
     if (!items.length) {
@@ -758,6 +817,7 @@ export async function mount(root, sdk) {
     }
     for (const item of items) {
       const card = el('article', 'av-rec-card')
+      card.__recommendationItem = item
       const image = el('button', 'av-rec-cover')
       image.type = 'button'
       image.onclick = () => openDetail(item)
@@ -836,6 +896,7 @@ export async function mount(root, sdk) {
       body.append(head, meta, people, scoreParts, reasons, buttons)
       card.append(image, body)
       grid.appendChild(card)
+      exposureObserver?.observe?.(card)
     }
   }
 

@@ -1,7 +1,7 @@
 {
   "id": "av-recommend",
   "name": "推荐中心",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "基于媒体库偏好、JavDB 候选、完整候选池与资源可用性的推荐中心。",
   "type": "knowledge_app",
   "tags": ["official", "recommendation", "knowledge", "javdb"],
@@ -27,7 +27,9 @@
     "prefer_cracked_strength": {"type": "number", "label": "破解偏好强度", "description": "0 到 100，控制破解特征在动作分中的权重。", "default": 100, "min": 0, "max": 100, "step": 5},
     "prefer_subtitle_strength": {"type": "number", "label": "中字偏好强度", "description": "0 到 100，控制中字特征在动作分中的权重。", "default": 100, "min": 0, "max": 100, "step": 5},
     "exploration_ratio": {"type": "number", "label": "探索比例", "description": "在最终推荐列表中保留的低分探索位比例，0 到 0.5。", "default": 0, "min": 0, "max": 0.5, "step": 0.05},
-    "minimum_confidence_threshold": {"type": "number", "label": "最低置信度", "description": "过滤置信度低于该值的候选，0 到 80。", "default": 0, "min": 0, "max": 80, "step": 5}
+    "minimum_confidence_threshold": {"type": "number", "label": "最低置信度", "description": "过滤置信度低于该值的候选，0 到 80。", "default": 0, "min": 0, "max": 80, "step": 5},
+    "adaptive_cold_start_enabled": {"type": "boolean", "label": "自适应冷启动", "description": "媒体库样本不足时自动混入少量高可用、多题材候选，并随画像成熟逐步退出。", "default": true},
+    "cold_start_min_library_size": {"type": "number", "label": "冷启动样本门槛", "description": "媒体库达到该作品数量后完全使用个性化模型。", "default": 20, "min": 5, "max": 100, "step": 5}
   },
   "default_config": {
     "candidate_limit": 48,
@@ -49,7 +51,9 @@
     "prefer_cracked_strength": 100,
     "prefer_subtitle_strength": 100,
     "exploration_ratio": 0,
-    "minimum_confidence_threshold": 0
+    "minimum_confidence_threshold": 0,
+    "adaptive_cold_start_enabled": true,
+    "cold_start_min_library_size": 20
   },
   "contributions": {
     "sidebar": {"label": "推荐中心", "route": "/plugins/av-recommend", "icon": "icons/service.svg"},

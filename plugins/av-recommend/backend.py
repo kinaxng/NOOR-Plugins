@@ -45,7 +45,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 7
+RECOMMENDATION_ALGORITHM_VERSION = 8
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
 _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
@@ -589,7 +589,7 @@ def _ensure_store() -> dict[str, Any]:
     data_file = _data_file()
     data_file.parent.mkdir(parents=True, exist_ok=True)
     if not data_file.exists():
-        data = {"version": 1, "ignored": [], "liked": [], "disliked": []}
+        data = {"version": 2, "ignored": [], "liked": [], "disliked": [], "exposures": {}, "exposure_batches": []}
         data_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return data
     try:
@@ -599,6 +599,8 @@ def _ensure_store() -> dict[str, Any]:
         data.setdefault("ignored", [])
         data.setdefault("liked", [])
         data.setdefault("disliked", [])
+        data.setdefault("exposures", {})
+        data.setdefault("exposure_batches", [])
         return data
     except Exception:
         backup = data_file.with_suffix(f".{int(time.time())}.bak")
@@ -615,6 +617,67 @@ def _save_store(data: dict[str, Any]) -> None:
     tmp = data_file.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(data_file)
+
+
+def _exposure_penalties(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, float]:
+    now_ms = int(now_ms or _now_ms())
+    mature_age_ms = 7 * 86400 * 1000
+    penalties: dict[str, float] = {}
+    for raw_code, row in (store.get("exposures") or {}).items():
+        if not isinstance(row, dict) or row.get("converted_at"):
+            continue
+        code = _norm_code(raw_code)
+        batches = int(row.get("batch_count") or 0)
+        first_seen = int(row.get("first_seen_at") or now_ms)
+        if code and batches >= 3 and now_ms - first_seen >= mature_age_ms:
+            penalties[code] = round(min(4.0, 0.75 + (batches - 3) * 0.45), 2)
+    return penalties
+
+
+def _mark_exposure_converted(store: dict[str, Any], code: Any) -> bool:
+    canonical = _norm_code(code)
+    row = (store.get("exposures") or {}).get(canonical)
+    if not canonical or not isinstance(row, dict) or row.get("converted_at"):
+        return False
+    row["converted_at"] = _now_ms()
+    return True
+
+
+def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dict[str, Any]]) -> int:
+    batch_id = str(batch_id or "").strip()[:160]
+    batches = [str(value) for value in (store.get("exposure_batches") or [])]
+    if not batch_id or batch_id in batches:
+        return 0
+    now = _now_ms()
+    exposures = store.setdefault("exposures", {})
+    recorded = 0
+    for item in items[:100]:
+        if not isinstance(item, dict):
+            continue
+        code = _norm_code(item.get("code"))
+        if not code:
+            continue
+        row = exposures.get(code) if isinstance(exposures.get(code), dict) else {}
+        if row.get("converted_at"):
+            continue
+        row.update({
+            "code": code,
+            "first_seen_at": int(row.get("first_seen_at") or now),
+            "last_seen_at": now,
+            "batch_count": int(row.get("batch_count") or 0) + 1,
+            "actors": [str(value).strip() for value in (item.get("actors") or []) if str(value or "").strip()][:8],
+            "categories": [str(value).strip() for value in (item.get("categories") or []) if str(value or "").strip()][:12],
+        })
+        exposures[code] = row
+        recorded += 1
+    store["exposure_batches"] = [batch_id, *batches][:128]
+    retained = [
+        (code, row) for code, row in exposures.items()
+        if isinstance(row, dict) and (not row.get("converted_at") or now - int(row.get("converted_at") or now) < 90 * 86400 * 1000)
+    ]
+    retained.sort(key=lambda pair: int(pair[1].get("last_seen_at") or 0), reverse=True)
+    store["exposures"] = dict(retained[:2000])
+    return recorded
 
 
 def _text_has_subtitle(value: Any) -> bool:
@@ -1564,6 +1627,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     behavior_actors: Counter = feedback.get("behavior_actors") or Counter()
     behavior_categories: Counter = feedback.get("behavior_categories") or Counter()
     outcome_model: dict[str, Any] = feedback.get("outcome_model") or {}
+    exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
         return None
@@ -1595,6 +1659,11 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     quality_score = 0.0
     penalty_score = 0.0
     outcome_calibration_score = 0.0
+    passive_exposure_penalty = float(exposure_penalties.get(code) or 0)
+    if passive_exposure_penalty > 0:
+        score -= passive_exposure_penalty
+        penalty_score += passive_exposure_penalty
+        reasons.append("多次看过但尚未行动")
 
     actor_counter: Counter = profile.get("actor_identities") or profile.get("actors") or Counter()
     genre_counter: Counter = profile.get("genres") or Counter()
@@ -1863,10 +1932,13 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         score += 2
         quality_score += 2
 
-    if profile.get("media_count", 0) < 5:
-        score += min(12, float(item.get("score") or 0) * 2)
-        if not reasons:
-            reasons.append("媒体库样本较少，按资源可用性推荐")
+    cold_start_strength = float(config.get("_cold_start_strength") or 0)
+    if cold_start_strength > 0:
+        cold_boost = min(8, (min(magnets_count, 5) * 0.8 + min(actionability_score, 12) * 0.25 + min(quality_score, 6) * 0.35) * cold_start_strength)
+        score += cold_boost
+        quality_score += cold_boost
+        if cold_boost >= 1.5:
+            reasons.append("冷启动：优先可用与多样性")
 
     if media_count >= 10 and personalized_score < 10:
         score -= 12
@@ -1904,6 +1976,10 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         _record_filter(diagnostics, item, code, "score_too_low", "综合评分小于等于 0")
         return None
     match_bucket = _score_bucket(personalized_score)
+    evidence_reliability = 1 - math.exp(-media_count / 20)
+    raw_confidence = personalized_score * 1.6 + actionability_score * 0.45 - penalty_score * 0.7
+    confidence = max(0, min(100, round(raw_confidence * (0.52 + evidence_reliability * 0.48))))
+    uncertainty_radius = round(24 * (1 - evidence_reliability))
     return {
         "code": code,
         "title": item.get("title") or item.get("display_title") or code,
@@ -1929,7 +2005,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "quality_score": round(quality_score, 1),
         "penalty_score": round(penalty_score, 1),
         "match_level": match_bucket,
-        "confidence": max(0, min(100, round(personalized_score * 1.6 + actionability_score * 0.45 - penalty_score * 0.7))),
+        "confidence": confidence,
+        "confidence_interval": {"lower": max(0, confidence - uncertainty_radius), "upper": min(100, confidence + uncertainty_radius), "reliability": round(evidence_reliability, 3)},
         "outcome_calibration": round(outcome_calibration_score, 1),
         "score_breakdown": {
             "preference": round(personalized_score, 1),
@@ -2258,6 +2335,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "behavior_actors": Counter(behavior.get("actor_identities") or behavior.get("actors") or {}),
         "behavior_categories": Counter(behavior.get("categories") or {}),
         "outcome_model": behavior.get("outcomes") or {},
+        "exposure_penalties": _exposure_penalties(store),
     }
     requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
     cache_ttl = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
@@ -2278,6 +2356,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "liked_categories": dict(feedback["liked_categories"]),
         "disliked_actors": dict(feedback["disliked_actors"]),
         "disliked_categories": dict(feedback["disliked_categories"]),
+        "exposure_penalties": feedback["exposure_penalties"],
         "source_mode": source_mode,
         "requested_limit": requested_limit,
     }, sort_keys=True, ensure_ascii=False)
@@ -2287,6 +2366,10 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             return await _merge_cached_resource_intelligence(cached)
 
     profile = await _library_profile()
+    cold_start_threshold = max(5, min(int(config.get("cold_start_min_library_size") or 20), 100))
+    media_count = int(profile.get("media_count") or 0)
+    cold_start_strength = max(0.0, min(1.0, 1 - media_count / cold_start_threshold)) if config.get("adaptive_cold_start_enabled", True) else 0.0
+    scoring_config = {**config, "_cold_start_strength": cold_start_strength}
     live_codes, live_warning = await _live_library_codes(config, force=bool(payload.get("refresh")))
     cache_key = json.dumps({
         "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
@@ -2300,6 +2383,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "liked_categories": dict(feedback["liked_categories"]),
         "disliked_actors": dict(feedback["disliked_actors"]),
         "disliked_categories": dict(feedback["disliked_categories"]),
+        "exposure_penalties": feedback["exposure_penalties"],
         "library_codes": sorted(live_codes),
         "library_code_count": len(profile.get("codes") or []),
         "library_code_fingerprint": _code_fingerprint(profile.get("codes") or set()),
@@ -2347,7 +2431,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     for candidate_index, item in enumerate(candidates):
         if candidate_index and candidate_index % 64 == 0:
             await asyncio.sleep(0)
-        rec = _candidate_score(item, profile, config, feedback, filtered_diagnostics)
+        rec = _candidate_score(item, profile, scoring_config, feedback, filtered_diagnostics)
         if rec:
             scored.append(rec)
     scored = _dedupe_recommendations(scored)
@@ -2360,7 +2444,10 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         warnings.extend(resource_warnings)
     scored.sort(key=lambda x: (x["score"], (x.get("resource_summary") or {}).get("total") or 0, x.get("magnets_count") or 0, x.get("release_date") or ""), reverse=True)
     scored = _diversify_recommendations(scored)
-    scored = _apply_recommendation_controls(scored, config, requested_limit)
+    controls_config = dict(config)
+    if cold_start_strength > 0:
+        controls_config["exploration_ratio"] = max(float(config.get("exploration_ratio") or 0), 0.1 + cold_start_strength * 0.1)
+    scored = _apply_recommendation_controls(scored, controls_config, requested_limit)
     # Diversification can promote candidates that were outside the first-pass
     # window. Confirm the cards that will actually be displayed as a second
     # pass, skipping rows already enriched above.
@@ -2393,6 +2480,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "today_increment": sum(1 for item in candidates if item.get("is_today_increment")),
             "ignored": len([x for x in feedback["ignored_codes"] if x]),
             "disliked": len([x for x in feedback["disliked_codes"] if x]),
+            "cold_start": {"active": cold_start_strength > 0, "strength": round(cold_start_strength, 3), "threshold": cold_start_threshold},
         },
         "candidate_meta": {"pool": _candidate_pool_stats(pool)},
         "filtered": _filtered_summary(filtered_diagnostics),
@@ -2480,6 +2568,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         }
         data[key] = [x for x in data.get(key, []) if _norm_code(x.get("code") if isinstance(x, dict) else x) != code]
         data[key].insert(0, row)
+        _mark_exposure_converted(data, code)
         _save_store(data)
         _invalidate_recommendation_cache()
         return {"ok": True, "code": code, "kind": kind}
@@ -2492,14 +2581,29 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
             categories=list(payload.get("categories") or []),
             data=payload.get("data") if isinstance(payload.get("data"), dict) else {},
         )
-        if created:
+        data = _ensure_store()
+        converted = _mark_exposure_converted(data, payload.get("code"))
+        if converted:
+            _save_store(data)
+        if created or converted:
             _invalidate_recommendation_cache()
-        return {"ok": True, "created": created}
+        return {"ok": True, "created": created, "exposure_converted": converted}
+    if action == "exposure":
+        data = _ensure_store()
+        before = _exposure_penalties(data)
+        recorded = _record_exposure_batch(data, str(payload.get("batch_id") or ""), list(payload.get("items") or []))
+        if recorded:
+            _save_store(data)
+            if _exposure_penalties(data) != before:
+                _invalidate_recommendation_cache()
+        return {"ok": True, "recorded": recorded}
     if action == "reset_feedback":
         data = _ensure_store()
         data["ignored"] = []
         data["liked"] = []
         data["disliked"] = []
+        data["exposures"] = {}
+        data["exposure_batches"] = []
         _save_store(data)
         await clear_preference_events(source="av-recommend")
         _invalidate_recommendation_cache()
