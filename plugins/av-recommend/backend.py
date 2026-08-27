@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, semantic_tokens
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 25
-PERSONALIZED_MODEL_VERSION = "personal-v25"
+RECOMMENDATION_ALGORITHM_VERSION = 26
+PERSONALIZED_MODEL_VERSION = "personal-v26"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -2314,6 +2314,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     liked_topics: Counter = feedback.get("liked_topics") or Counter()
     disliked_topics: Counter = feedback.get("disliked_topics") or Counter()
     session_intent: dict[str, Any] = feedback.get("session_intent") or {}
+    search_intent: dict[str, Any] = feedback.get("search_intent") or {}
     exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
@@ -2327,7 +2328,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     in_library = code in profile.get("codes", set()) or bool((item.get("library") or {}).get("in_library") if isinstance(item.get("library"), dict) else False)
     actors = _unique_names([canonical_actor_name(name) for name in (item.get("actors") or [])], 12)
     actor_identities = [actor_identity_key(name) for name in actors]
-    base_categories = _unique_names(item.get("categories") or [], 16)
+    base_categories = _unique_names([canonical_preference_category(name) for name in (item.get("categories") or [])], 16)
     title_profile = _ensure_title_profile(item)
     title_traits = _title_trait_labels(title_profile, limit=10, min_weight=0.55)
     categories = _merge_title_traits(base_categories, title_traits, 18)
@@ -2350,6 +2351,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     trend_preference_score = 0.0
     interest_topic_score = 0.0
     session_intent_score = 0.0
+    search_intent_score = 0.0
     topic_feedback_adjustment = 0.0
     matched_interest_topic: dict[str, Any] | None = None
     passive_exposure_penalty = float(exposure_penalties.get(code) or 0)
@@ -2564,6 +2566,17 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         personalized_score += session_intent_score
         trend_preference_score += session_intent_score
         reasons.append("当前兴趣方向")
+
+    search_actor_strength = sum(float((search_intent.get("actors") or {}).get(identity) or 0) for identity in actor_identities)
+    search_category_strength = sum(float((search_intent.get("categories") or {}).get(category) or 0) * _generic_category_factor(category) for category in candidate_categories)
+    candidate_terms = semantic_tokens(_title_text(item)).get("weighted") or {}
+    search_term_strength = sum(float(weight) * float(candidate_terms.get(term) or 0) for term, weight in (search_intent.get("terms") or {}).items())
+    search_intent_score = min(2.2, search_actor_strength * 1.1) + min(1.5, search_category_strength * 0.6) + min(1.8, search_term_strength * 0.35)
+    if search_intent_score >= 0.25:
+        score += search_intent_score
+        personalized_score += search_intent_score
+        trend_preference_score += search_intent_score
+        reasons.append("当前搜索方向")
 
     outcome_signals: list[tuple[float, float]] = []
     actor_outcomes = outcome_model.get("actors") if isinstance(outcome_model.get("actors"), dict) else {}
@@ -2810,6 +2823,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         {"type": "trend", "label": "近期趋势", "score": round(trend_preference_score, 1)},
         {"type": "topic", "label": "组合兴趣主题", "score": round(interest_topic_score, 1), "evidence": matched_interest_topic or {}},
         {"type": "session", "label": "当前兴趣方向", "score": round(session_intent_score, 1)},
+        {"type": "search", "label": "当前搜索方向", "score": round(search_intent_score, 1)},
         {"type": "outcome", "label": "入库结果校准", "score": round(outcome_calibration_score, 1)},
         {"type": "resource", "label": "资源可用性", "score": round(actionability_score, 1)},
         {"type": "quality", "label": "作品质量", "score": round(quality_score, 1)},
@@ -2874,6 +2888,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "trend": round(trend_preference_score, 1),
             "interest_topic": round(interest_topic_score, 1),
             "session_intent": round(session_intent_score, 1),
+            "search_intent": round(search_intent_score, 1),
             "outcomes": round(outcome_calibration_score, 1),
             "recall_route": round(route_calibration_score, 1),
             "resources": round(actionability_score, 1),
@@ -3349,6 +3364,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     exploration_evaluation = _exploration_evaluation(store)
     topic_evaluation = _topic_evaluation(store)
     session_intent = _session_intent_summary(store)
+    core_search_intent = search_intent_summary()
     feedback = {
         "ignored_codes": _feedback_codes(store.get("ignored")),
         "liked_codes": _feedback_codes(store.get("liked")),
@@ -3368,6 +3384,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "interest_topics": list((behavior.get("interest_topics") or {}).get("topics") or []),
         "topic_weights": {topic_id: float(metric.get("weight") or 1) for topic_id, metric in (topic_evaluation.get("topics") or {}).items()},
         "session_intent": session_intent,
+        "search_intent": core_search_intent,
         "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
         "exposure_penalties": _exposure_penalties(store),
     }
@@ -3398,6 +3415,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "liked_topics": dict(feedback["liked_topics"]),
         "disliked_topics": dict(feedback["disliked_topics"]),
         "session_intent_revision": session_intent["revision"],
+        "search_intent_revision": core_search_intent["revision"],
         "source_mode": source_mode,
         "requested_limit": requested_limit,
     }, sort_keys=True, ensure_ascii=False)
@@ -3437,6 +3455,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "liked_topics": dict(feedback["liked_topics"]),
         "disliked_topics": dict(feedback["disliked_topics"]),
         "session_intent_revision": session_intent["revision"],
+        "search_intent_revision": core_search_intent["revision"],
         "library_codes": sorted(live_codes),
         "library_code_count": len(profile.get("codes") or []),
         "library_code_fingerprint": _code_fingerprint(profile.get("codes") or set()),
@@ -3605,7 +3624,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "top_series": _top(profile.get("series") or Counter(), 8),
             "top_directors": _top(profile.get("directors") or Counter(), 8),
             "top_interest_topics": list((behavior.get("interest_topics") or {}).get("topics") or [])[:8],
-            "current_intent": session_intent,
+            "current_intent": {"interaction": session_intent, "search": core_search_intent},
         },
         "stats": {
             "candidates": len(candidates),
@@ -3621,7 +3640,12 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "route_evaluation": route_evaluation,
             "exploration_evaluation": exploration_evaluation,
             "topic_evaluation": topic_evaluation,
-            "session_intent": {"event_count": session_intent["event_count"], "revision": session_intent["revision"]},
+            "session_intent": {
+                "event_count": session_intent["event_count"] + core_search_intent["event_count"],
+                "interaction_events": session_intent["event_count"],
+                "search_events": core_search_intent["event_count"],
+                "revision": f"{session_intent['revision']}:{core_search_intent['revision']}",
+            },
             "exploration": {
                 "adaptive": bool(config.get("adaptive_exploration_enabled", True)),
                 "ratio": round(float(controls_config.get("exploration_ratio") or 0), 3),

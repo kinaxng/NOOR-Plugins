@@ -50,3 +50,30 @@ def test_topic_feedback_is_counted_without_hard_exclusion() -> None:
         {"interest_topic": {}},
     ]) == Counter({"topic:a": 2})
 
+
+def test_v26_search_intent_scores_canonical_actor_category_and_title_term() -> None:
+    backend = _backend()
+    identity = backend.actor_identity_key("吉沢明歩")
+    profile = {
+        "codes": set(), "actor_identities": Counter(), "actors": Counter(),
+        "genres": Counter({"人妻": 2}), "tags": Counter(), "studios": Counter(),
+        "series": Counter(), "directors": Counter(), "title_traits": Counter(),
+        "semantic_terms": Counter(), "actor_category": Counter(), "category_pairs": Counter(),
+        "media_count": 20,
+    }
+    item = {
+        "code": "AAA-002", "title": "秘密の人妻ドラマ", "actors": ["吉泽明步"],
+        "categories": ["已婚妇女"], "magnets_count": 1, "release_date": "2026-01-01",
+    }
+    baseline = backend._candidate_score(item, profile, {}, {})
+    searched = backend._candidate_score(item, profile, {}, {
+        "search_intent": {
+            "actors": {identity: 1.0}, "categories": {"人妻": 1.0}, "terms": {"秘密": 1.0},
+        },
+    })
+
+    assert baseline is not None and searched is not None
+    assert baseline["categories"][:2] == ["人妻", "剧情"]
+    assert searched["score"] > baseline["score"]
+    assert searched["score_breakdown"]["search_intent"] >= 1.7
+    assert "当前搜索方向" in searched["reasons"]
