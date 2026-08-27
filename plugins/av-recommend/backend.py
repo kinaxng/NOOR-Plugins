@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 21
-PERSONALIZED_MODEL_VERSION = "personal-v21"
+RECOMMENDATION_ALGORITHM_VERSION = 22
+PERSONALIZED_MODEL_VERSION = "personal-v22"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -2165,6 +2165,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     trend_categories: dict[str, float] = feedback.get("trend_categories") or {}
     outcome_model: dict[str, Any] = feedback.get("outcome_model") or {}
     route_weights: dict[str, float] = feedback.get("route_weights") or {}
+    interest_topics: list[dict[str, Any]] = feedback.get("interest_topics") or []
     exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
@@ -2199,6 +2200,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     outcome_calibration_score = 0.0
     route_calibration_score = 0.0
     trend_preference_score = 0.0
+    interest_topic_score = 0.0
+    matched_interest_topic: dict[str, Any] | None = None
     passive_exposure_penalty = float(exposure_penalties.get(code) or 0)
     if passive_exposure_penalty > 0:
         score -= passive_exposure_penalty
@@ -2345,6 +2348,43 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         trend_preference_score += adjustment
         if adjustment >= 0.8:
             reasons.append("近期题材兴趣上升")
+
+    candidate_actor_ids = set(actor_identities)
+    candidate_categories = set(categories)
+    for topic in interest_topics:
+        if not isinstance(topic, dict):
+            continue
+        topic_actor_ids = {str(row.get("identity") or "") for row in topic.get("actors") or [] if isinstance(row, dict) and row.get("identity")}
+        topic_categories = {str(name) for name in topic.get("categories") or [] if str(name or "").strip()}
+        actor_matches = candidate_actor_ids & topic_actor_ids
+        category_matches = candidate_categories & topic_categories
+        signal_count = int(bool(actor_matches)) + min(2, len(category_matches))
+        if signal_count < 2:
+            continue
+        confidence = float(topic.get("confidence") or 0)
+        stable_strength = float(topic.get("strength") or 0)
+        recent_strength = float(topic.get("recent_strength") or 0)
+        momentum = float(topic.get("momentum") or 0)
+        coherence = min(1.0, signal_count / 3)
+        topic_score = min(5.0, (stable_strength * 8 + recent_strength * 6 + max(-0.1, momentum) * 4 + signal_count * 0.45) * confidence * coherence)
+        if topic_score > interest_topic_score:
+            interest_topic_score = topic_score
+            matched_interest_topic = {
+                "id": topic.get("id"),
+                "label": topic.get("label"),
+                "actor_matches": sorted(actor_matches),
+                "category_matches": sorted(category_matches),
+                "score": round(topic_score, 2),
+                "momentum": round(momentum, 4),
+            }
+    if interest_topic_score >= 0.5 and matched_interest_topic:
+        score += interest_topic_score
+        personalized_score += interest_topic_score
+        relationship_preference_score += interest_topic_score
+        reasons.append(f"兴趣主题：{matched_interest_topic['label']}")
+    else:
+        interest_topic_score = 0.0
+        matched_interest_topic = None
 
     outcome_signals: list[tuple[float, float]] = []
     actor_outcomes = outcome_model.get("actors") if isinstance(outcome_model.get("actors"), dict) else {}
@@ -2589,6 +2629,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         {"type": "relationship", "label": "作品关系", "score": round(relationship_preference_score, 1), "evidence": list(item.get("neighbor_evidence") or [])[:3]},
         {"type": "semantic", "label": "标题语义", "score": round(semantic_preference_score, 1)},
         {"type": "trend", "label": "近期趋势", "score": round(trend_preference_score, 1)},
+        {"type": "topic", "label": "组合兴趣主题", "score": round(interest_topic_score, 1), "evidence": matched_interest_topic or {}},
         {"type": "outcome", "label": "入库结果校准", "score": round(outcome_calibration_score, 1)},
         {"type": "resource", "label": "资源可用性", "score": round(actionability_score, 1)},
         {"type": "quality", "label": "作品质量", "score": round(quality_score, 1)},
@@ -2632,6 +2673,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "recommendation_explanation": explanation,
         "outcome_calibration": round(outcome_calibration_score, 1),
         "route_calibration": round(route_calibration_score, 1),
+        "interest_topic": matched_interest_topic or {},
         "neighbor_score": round(neighbor_score, 3),
         "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
         "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
@@ -2649,6 +2691,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "semantic_preference": round(semantic_preference_score, 1),
             "feedback": round(feedback_score, 1),
             "trend": round(trend_preference_score, 1),
+            "interest_topic": round(interest_topic_score, 1),
             "outcomes": round(outcome_calibration_score, 1),
             "recall_route": round(route_calibration_score, 1),
             "resources": round(actionability_score, 1),
@@ -3110,6 +3153,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "trend_actors": dict((((behavior.get("trends") or {}).get("actors") or {}).get("deltas") or {})),
         "trend_categories": dict((((behavior.get("trends") or {}).get("categories") or {}).get("deltas") or {})),
         "outcome_model": behavior.get("outcomes") or {},
+        "interest_topics": list((behavior.get("interest_topics") or {}).get("topics") or []),
         "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
         "exposure_penalties": _exposure_penalties(store),
     }
@@ -3335,6 +3379,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "top_studios": _top(profile.get("studios") or Counter(), 8),
             "top_series": _top(profile.get("series") or Counter(), 8),
             "top_directors": _top(profile.get("directors") or Counter(), 8),
+            "top_interest_topics": list((behavior.get("interest_topics") or {}).get("topics") or [])[:8],
         },
         "stats": {
             "candidates": len(candidates),

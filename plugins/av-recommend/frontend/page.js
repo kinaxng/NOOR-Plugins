@@ -264,6 +264,7 @@ export async function mount(root, sdk) {
       ['演员', p.top_actors || []],
       ['类型', p.top_genres || []],
       ['标签', p.top_tags || []],
+      ['兴趣主题', (p.top_interest_topics || []).map(item => ({ name: item.label, count: `${item.support || 0}部 · 置信${Math.round((item.confidence || 0) * 100)}%` }))],
     ]
     for (const [label, items] of groups) {
       const group = el('div', 'av-rec-pref-group')
@@ -892,6 +893,7 @@ export async function mount(root, sdk) {
         ['类型', breakdown.category_preference],
         ['关系', breakdown.relationship_preference],
         ['趋势', breakdown.trend],
+        ['主题', breakdown.interest_topic],
         ['资源', breakdown.resources],
         ['质量', breakdown.quality],
         ['降权', breakdown.penalty ? `-${Math.round(breakdown.penalty)}` : '0'],
