@@ -1060,7 +1060,6 @@ async def _library_profile() -> dict[str, Any]:
             with contextlib.suppress(Exception):
                 _save_title_profile_cache(signature, title_profile["title_traits"], title_profile["title_terms"], len(media))
         profile["title_traits"] = title_profile["title_traits"]
-        profile["title_terms"] = title_profile["title_terms"]
         if semantic_work_weights:
             try:
                 work_rows = await db.execute(select(WorkProfile).where(WorkProfile.code.in_(semantic_work_weights)))
@@ -1073,6 +1072,11 @@ async def _library_profile() -> dict[str, Any]:
                 profile["semantic_terms"] = Counter(dict(profile["semantic_terms"].most_common(2400)))
             except SQLAlchemyError:
                 pass
+        # Keep the existing profile response field for frontend compatibility,
+        # but use Intelligence Core as the single source of title semantics.
+        # The former local n-gram miner produced fragments such as "ンダー"
+        # and also caused the same title preference to be scored twice.
+        profile["title_terms"] = profile["semantic_terms"]
         for item in media:
             data = item.data or {}
             code = _norm_code(json.dumps(data, ensure_ascii=False) + " " + item.label)
@@ -1540,7 +1544,6 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     series_counter: Counter = profile.get("series") or Counter()
     director_counter: Counter = profile.get("directors") or Counter()
     title_trait_counter: Counter = profile.get("title_traits") or Counter()
-    title_term_counter: Counter = profile.get("title_terms") or Counter()
     semantic_term_counter: Counter = profile.get("semantic_terms") or Counter()
     actor_category_counter: Counter = profile.get("actor_category") or Counter()
     media_count = max(int(profile.get("media_count") or 0), 1)
@@ -1605,15 +1608,6 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         personalized_score += boost
         category_preference_score += boost
         reasons.append("标题题材：" + "/".join(name for name, _ in sorted_traits[:3]))
-
-    mined_term_hits = _profile_title_term_matches(item, title_term_counter, 8)
-    if mined_term_hits:
-        boost = min(14, sum(min(4.0, math.log2(float(hit.get("count") or 0) + 1) * 0.95) for hit in mined_term_hits[:5]))
-        if boost > 0:
-            score += boost
-            personalized_score += boost
-            category_preference_score += boost
-            reasons.append("媒体库标题词：" + "/".join(str(hit.get("name") or "") for hit in mined_term_hits[:3] if hit.get("name")))
 
     semantic_hits = _semantic_profile_matches(item, semantic_term_counter, media_count, 8)
     if semantic_hits:
