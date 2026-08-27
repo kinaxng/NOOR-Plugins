@@ -20,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, canonical_actor_name, clear_preference_events, preference_behavior_summary, record_preference_event, semantic_tokens
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, clear_preference_events, preference_behavior_summary, record_preference_event, semantic_tokens
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -464,7 +464,7 @@ def _feedback_counter(entries: Any, key: str) -> Counter:
             text = str(value or "").strip()
             if text:
                 if key == "actors":
-                    text = canonical_actor_name(text)
+                    text = actor_identity_key(text)
                 counter[text] += 1
     return counter
 
@@ -986,6 +986,7 @@ async def _library_profile() -> dict[str, Any]:
         "codes": set(),
         "media_by_code": {},
         "actors": Counter(),
+        "actor_identities": Counter(),
         "genres": Counter(),
         "tags": Counter(),
         "studios": Counter(),
@@ -1013,6 +1014,7 @@ async def _library_profile() -> dict[str, Any]:
             "codes": set(),
             "media_by_code": {},
             "actors": Counter(),
+            "actor_identities": Counter(),
             "genres": Counter(),
             "tags": Counter(),
             "studios": Counter(),
@@ -1054,6 +1056,7 @@ async def _library_profile() -> dict[str, Any]:
             elif rel == "HAS_ACTOR":
                 actor_name = canonical_actor_name(target.label)
                 profile["actors"][actor_name] += media_weights.get(edge.source_entity_id, 1.0)
+                profile["actor_identities"][actor_identity_key(target.label)] += media_weights.get(edge.source_entity_id, 1.0)
                 relations_by_media[edge.source_entity_id]["actors"].add(actor_name)
             elif rel == "HAS_GENRE":
                 profile["genres"][target.label] += media_weights.get(edge.source_entity_id, 1.0)
@@ -1552,6 +1555,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         return None
     in_library = code in profile.get("codes", set()) or bool((item.get("library") or {}).get("in_library") if isinstance(item.get("library"), dict) else False)
     actors = _unique_names([canonical_actor_name(name) for name in (item.get("actors") or [])], 12)
+    actor_identities = [actor_identity_key(name) for name in actors]
     base_categories = _unique_names(item.get("categories") or [], 16)
     title_profile = _ensure_title_profile(item)
     title_traits = _title_trait_labels(title_profile, limit=10, min_weight=0.55)
@@ -1571,7 +1575,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     quality_score = 0.0
     penalty_score = 0.0
 
-    actor_counter: Counter = profile.get("actors") or Counter()
+    actor_counter: Counter = profile.get("actor_identities") or profile.get("actors") or Counter()
     genre_counter: Counter = profile.get("genres") or Counter()
     tag_counter: Counter = profile.get("tags") or Counter()
     studio_counter: Counter = profile.get("studios") or Counter()
@@ -1582,7 +1586,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     actor_category_counter: Counter = profile.get("actor_category") or Counter()
     media_count = max(int(profile.get("media_count") or 0), 1)
 
-    actor_hits = [(name, actor_counter.get(name, 0)) for name in actors if actor_counter.get(name, 0) > 0]
+    actor_hits = [(name, actor_counter.get(identity, 0)) for name, identity in zip(actors, actor_identities) if actor_counter.get(identity, 0) > 0]
     if actor_hits:
         best_name, best_count = max(actor_hits, key=lambda x: x[1])
         confidence = _preference_confidence(best_count, media_count)
@@ -1600,7 +1604,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
 
     feedback_actor_boost = 0.0
     feedback_actor_penalty = 0.0
-    for actor in actors:
+    for actor in actor_identities:
         feedback_actor_boost += min(8, liked_actors.get(actor, 0) * 4)
         # A single dislike is a weak signal; repeated selected dislike is a real
         # user preference. Keep it soft to avoid "误杀" an actor that only
@@ -1619,7 +1623,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         penalty_score += feedback_actor_penalty
         reasons.append("负反馈演员降权")
 
-    behavior_actor_strength = sum(float(behavior_actors.get(actor) or 0) for actor in actors)
+    behavior_actor_strength = sum(float(behavior_actors.get(actor) or 0) for actor in actor_identities)
     if behavior_actor_strength > 0:
         boost = min(5, math.log2(behavior_actor_strength + 1) * 2.2)
         score += boost
@@ -2182,7 +2186,7 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
         "disliked_actors": _feedback_counter(store.get("disliked"), "actors"),
         "disliked_categories": _feedback_counter(store.get("disliked"), "categories"),
         "behavior_codes": Counter(behavior.get("codes") or {}),
-        "behavior_actors": Counter(behavior.get("actors") or {}),
+        "behavior_actors": Counter(behavior.get("actor_identities") or behavior.get("actors") or {}),
         "behavior_categories": Counter(behavior.get("categories") or {}),
     }
     requested_limit = max(1, min(int(payload.get("limit") or 48), 100))

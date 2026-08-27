@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import record_preference_event
+from app.knowledge.intelligence import enqueue_resource_refresh, record_preference_event
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
 PLUGIN_ID = "subscription-core"
@@ -926,6 +926,7 @@ async def _create_subscription(config: dict[str, Any], payload: dict[str, Any]) 
                 _event(data, existing.get("id", ""), "info", "订阅入口已更新", source)
             _save(data)
         _schedule_immediate_check(config, existing.get("id", ""))
+        await enqueue_resource_refresh([code], priority=5)
         return {"ok": True, "subscription": _public_subscription(existing), "created": False}
     media_item = await _find_media(code, raw_code)
     sub_type = str(payload.get("type") or "auto")
@@ -976,6 +977,7 @@ async def _create_subscription(config: dict[str, Any], payload: dict[str, Any]) 
     _event(data, sub["id"], "info", f"创建{'洗版' if sub_type == 'upgrade' else '订阅'}：{code}", {"media_found": bool(media_item), **{k: v for k, v in source.items() if v}})
     _save(data)
     _schedule_immediate_check(config, sub["id"])
+    await enqueue_resource_refresh([code], priority=5)
     return {"ok": True, "subscription": _public_subscription(sub), "created": True}
 
 
