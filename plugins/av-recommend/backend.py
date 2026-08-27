@@ -45,9 +45,20 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 16
-PERSONALIZED_MODEL_VERSION = "personal-v16"
+RECOMMENDATION_ALGORITHM_VERSION = 17
+PERSONALIZED_MODEL_VERSION = "personal-v17"
 STABLE_MODEL_VERSION = "stable-v1"
+CONVERSION_STAGE_VALUES = {
+    "detail_view": 0.15,
+    "feedback:like": 0.35,
+    "subscription": 0.60,
+    "download_intent": 0.75,
+    "download_submitted": 0.85,
+    "library_imported": 1.0,
+    "upgrade_completed": 1.0,
+}
+QUALIFIED_CONVERSION_THRESHOLD = 0.50
+VERIFIED_CONVERSION_THRESHOLD = 0.95
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
 _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
@@ -726,7 +737,7 @@ def _exposure_penalties(store: dict[str, Any], *, now_ms: int | None = None) -> 
     mature_age_ms = 7 * 86400 * 1000
     penalties: dict[str, float] = {}
     for raw_code, row in (store.get("exposures") or {}).items():
-        if not isinstance(row, dict) or row.get("converted_at"):
+        if not isinstance(row, dict) or _conversion_value(row) >= QUALIFIED_CONVERSION_THRESHOLD:
             continue
         code = _norm_code(raw_code)
         batches = int(row.get("batch_count") or 0)
@@ -739,15 +750,48 @@ def _exposure_penalties(store: dict[str, Any], *, now_ms: int | None = None) -> 
 def _mark_exposure_converted(store: dict[str, Any], code: Any, event_type: str = "interaction") -> bool:
     canonical = _norm_code(code)
     row = (store.get("exposures") or {}).get(canonical)
-    if not canonical or not isinstance(row, dict) or row.get("converted_at"):
+    event_type = str(event_type or "interaction")[:64]
+    value = float(CONVERSION_STAGE_VALUES.get(event_type, 0.0))
+    if not canonical or not isinstance(row, dict) or value <= 0:
         return False
-    row["converted_at"] = _now_ms()
-    row["conversion_event"] = str(event_type or "interaction")[:64]
-    row["converted_model"] = str(row.get("last_model") or "unknown")
-    row["converted_rank"] = int(row.get("last_rank") or 0)
-    row["converted_routes"] = list(row.get("last_routes") or [])
-    row["converted_strategy"] = str(row.get("last_strategy") or "ranking")
+    current_value = _conversion_value(row)
+    if value <= current_value:
+        return False
+    now = _now_ms()
+    row["converted_at"] = int(row.get("converted_at") or now)
+    row["last_conversion_at"] = now
+    row["conversion_event"] = event_type
+    row["conversion_stage"] = event_type
+    row["conversion_value"] = value
+    row["converted_model"] = str(row.get("converted_model") or row.get("last_model") or "unknown")
+    row["converted_rank"] = int(row.get("converted_rank") or row.get("last_rank") or 0)
+    row["converted_routes"] = list(row.get("converted_routes") or row.get("last_routes") or [])
+    row["converted_strategy"] = str(row.get("converted_strategy") or row.get("last_strategy") or "ranking")
+    history = [item for item in (row.get("conversion_history") or []) if isinstance(item, dict)]
+    history.append({"stage": event_type, "value": value, "at": now})
+    row["conversion_history"] = history[-12:]
     return True
+
+
+def _conversion_value(row: dict[str, Any]) -> float:
+    if not isinstance(row, dict):
+        return 0.0
+    if row.get("conversion_value") is not None:
+        return max(0.0, min(1.0, float(row.get("conversion_value") or 0.0)))
+    legacy_stage = str(row.get("conversion_stage") or row.get("conversion_event") or "")
+    if legacy_stage in CONVERSION_STAGE_VALUES:
+        return CONVERSION_STAGE_VALUES[legacy_stage]
+    return 1.0 if row.get("converted_at") or row.get("converted_model") else 0.0
+
+
+def _sync_core_conversion_stages(store: dict[str, Any], stages: Any) -> int:
+    if not isinstance(stages, dict):
+        return 0
+    upgraded = 0
+    for code, stage in stages.items():
+        if isinstance(stage, dict) and _mark_exposure_converted(store, code, str(stage.get("stage") or "")):
+            upgraded += 1
+    return upgraded
 
 
 def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dict[str, Any]]) -> int:
@@ -765,7 +809,7 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
         if not code:
             continue
         row = exposures.get(code) if isinstance(exposures.get(code), dict) else {}
-        if row.get("converted_at"):
+        if _conversion_value(row) >= VERIFIED_CONVERSION_THRESHOLD:
             continue
         row.update({
             "code": code,
@@ -847,20 +891,25 @@ def _model_evaluation(store: dict[str, Any]) -> dict[str, Any]:
         for version, evidence in (row.get("models") or {}).items():
             if not isinstance(evidence, dict):
                 continue
-            metric = models.setdefault(str(version), {"exposed": 0, "impressions": 0, "converted": 0, "top10_converted": 0, "reciprocal_rank_sum": 0.0})
+            metric = models.setdefault(str(version), {"exposed": 0, "impressions": 0, "converted": 0, "verified": 0, "conversion_value_sum": 0.0, "top10_converted": 0, "reciprocal_rank_sum": 0.0})
             metric["exposed"] += 1
             metric["impressions"] += int(evidence.get("batch_count") or 0)
             if converted_model == version:
                 rank = int(row.get("converted_rank") or evidence.get("last_rank") or 0)
-                metric["converted"] += 1
-                metric["top10_converted"] += int(0 < rank <= 10)
-                metric["reciprocal_rank_sum"] += 1 / rank if rank > 0 else 0
+                value = _conversion_value(row)
+                metric["conversion_value_sum"] += value
+                qualified = value >= QUALIFIED_CONVERSION_THRESHOLD
+                metric["converted"] += int(qualified)
+                metric["verified"] += int(value >= VERIFIED_CONVERSION_THRESHOLD)
+                metric["top10_converted"] += int(qualified and 0 < rank <= 10)
+                metric["reciprocal_rank_sum"] += 1 / rank if qualified and rank > 0 else 0
     for metric in models.values():
         exposed = int(metric["exposed"])
         converted = int(metric["converted"])
         lower, upper = _wilson_interval(converted, exposed)
         metric.update({
             "conversion_rate": round(converted / max(exposed, 1), 4),
+            "weighted_conversion_rate": round(float(metric["conversion_value_sum"]) / max(exposed, 1), 4),
             "conversion_interval": {"lower": round(lower, 4), "upper": round(upper, 4)},
             "top10_rate": round(int(metric["top10_converted"]) / max(converted, 1), 4),
             "mrr": round(float(metric.pop("reciprocal_rank_sum")) / max(converted, 1), 4),
@@ -875,33 +924,39 @@ def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> di
     routes: dict[str, dict[str, Any]] = {}
     eligible_rows = 0
     converted_rows = 0
+    conversion_value_sum = 0.0
     for row in (store.get("exposures") or {}).values():
         if not isinstance(row, dict):
             continue
-        converted = bool(row.get("converted_at"))
+        value = _conversion_value(row)
+        converted = value >= QUALIFIED_CONVERSION_THRESHOLD
         mature = now_ms - int(row.get("first_seen_at") or now_ms) >= mature_age_ms
-        if not converted and not mature:
+        if value <= 0 and not mature:
             continue
         eligible_rows += 1
         converted_rows += int(converted)
-        converted_routes = set(row.get("converted_routes") or row.get("last_routes") or []) if converted else set()
+        conversion_value_sum += value
+        converted_routes = set(row.get("converted_routes") or row.get("last_routes") or []) if value > 0 else set()
         for route, evidence in (row.get("routes") or {}).items():
             if not isinstance(evidence, dict):
                 continue
-            metric = routes.setdefault(str(route), {"exposed": 0, "impressions": 0, "converted": 0})
+            metric = routes.setdefault(str(route), {"exposed": 0, "impressions": 0, "converted": 0, "verified": 0, "conversion_value_sum": 0.0})
             metric["exposed"] += 1
             metric["impressions"] += int(evidence.get("batch_count") or 0)
             metric["converted"] += int(converted and route in converted_routes)
-    global_rate = (converted_rows + 2) / (eligible_rows + 10)
+            metric["verified"] += int(value >= VERIFIED_CONVERSION_THRESHOLD and route in converted_routes)
+            metric["conversion_value_sum"] += value if route in converted_routes else 0.0
+    global_rate = (conversion_value_sum + 2) / (eligible_rows + 10)
     for metric in routes.values():
         exposed = int(metric["exposed"])
         converted = int(metric["converted"])
-        posterior = (converted + 2) / (exposed + 10)
+        posterior = (float(metric["conversion_value_sum"]) + 2) / (exposed + 10)
         reliability = exposed / (exposed + 20)
         factor = max(0.8, min(1.2, 1 + (posterior - global_rate) * 1.5 * reliability))
         lower, upper = _wilson_interval(converted, exposed)
         metric.update({
             "conversion_rate": round(converted / max(exposed, 1), 4),
+            "weighted_conversion_rate": round(float(metric["conversion_value_sum"]) / max(exposed, 1), 4),
             "posterior_rate": round(posterior, 4),
             "conversion_interval": {"lower": round(lower, 4), "upper": round(upper, 4)},
             "reliability": round(reliability, 3),
@@ -914,26 +969,30 @@ def _exploration_evaluation(store: dict[str, Any], *, now_ms: int | None = None)
     """Compare exploration and normal ranking using converted or mature cohorts."""
     now_ms = int(now_ms or _now_ms())
     mature_age_ms = 7 * 86400 * 1000
-    cohorts = {"exploration": {"exposed": 0, "impressions": 0, "converted": 0}, "ranking": {"exposed": 0, "impressions": 0, "converted": 0}}
+    cohorts = {"exploration": {"exposed": 0, "impressions": 0, "converted": 0, "verified": 0, "conversion_value_sum": 0.0}, "ranking": {"exposed": 0, "impressions": 0, "converted": 0, "verified": 0, "conversion_value_sum": 0.0}}
     for row in (store.get("exposures") or {}).values():
         if not isinstance(row, dict):
             continue
-        converted = bool(row.get("converted_at"))
-        if not converted and now_ms - int(row.get("first_seen_at") or now_ms) < mature_age_ms:
+        value = _conversion_value(row)
+        converted = value >= QUALIFIED_CONVERSION_THRESHOLD
+        if value <= 0 and now_ms - int(row.get("first_seen_at") or now_ms) < mature_age_ms:
             continue
-        converted_strategy = str(row.get("converted_strategy") or row.get("last_strategy") or "ranking") if converted else ""
+        converted_strategy = str(row.get("converted_strategy") or row.get("last_strategy") or "ranking") if value > 0 else ""
         for strategy, evidence in (row.get("strategies") or {}).items():
             if strategy not in cohorts or not isinstance(evidence, dict):
                 continue
             cohorts[strategy]["exposed"] += 1
             cohorts[strategy]["impressions"] += int(evidence.get("batch_count") or 0)
             cohorts[strategy]["converted"] += int(converted and strategy == converted_strategy)
+            cohorts[strategy]["verified"] += int(value >= VERIFIED_CONVERSION_THRESHOLD and strategy == converted_strategy)
+            cohorts[strategy]["conversion_value_sum"] += value if strategy == converted_strategy else 0.0
     for metric in cohorts.values():
         exposed, converted = int(metric["exposed"]), int(metric["converted"])
-        posterior = (converted + 2) / (exposed + 10)
+        posterior = (float(metric["conversion_value_sum"]) + 2) / (exposed + 10)
         lower, upper = _wilson_interval(converted, exposed)
         metric.update({
             "conversion_rate": round(converted / max(exposed, 1), 4),
+            "weighted_conversion_rate": round(float(metric["conversion_value_sum"]) / max(exposed, 1), 4),
             "posterior_rate": round(posterior, 4),
             "conversion_interval": {"lower": round(lower, 4), "upper": round(upper, 4)},
             "reliability": round(exposed / (exposed + 20), 3),
@@ -1973,6 +2032,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     behavior_codes: Counter = feedback.get("behavior_codes") or Counter()
     behavior_actors: Counter = feedback.get("behavior_actors") or Counter()
     behavior_categories: Counter = feedback.get("behavior_categories") or Counter()
+    trend_actors: dict[str, float] = feedback.get("trend_actors") or {}
+    trend_categories: dict[str, float] = feedback.get("trend_categories") or {}
     outcome_model: dict[str, Any] = feedback.get("outcome_model") or {}
     route_weights: dict[str, float] = feedback.get("route_weights") or {}
     exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
@@ -2008,6 +2069,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     penalty_score = 0.0
     outcome_calibration_score = 0.0
     route_calibration_score = 0.0
+    trend_preference_score = 0.0
     passive_exposure_penalty = float(exposure_penalties.get(code) or 0)
     if passive_exposure_penalty > 0:
         score -= passive_exposure_penalty
@@ -2072,6 +2134,16 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         feedback_score += boost
         reasons.append("近期互动演员")
 
+    actor_trend = sum(float(trend_actors.get(identity) or 0) for identity in actor_identities)
+    if actor_trend:
+        adjustment = max(-2.5, min(4.5, actor_trend * 10))
+        score += adjustment
+        personalized_score += adjustment
+        actor_preference_score += adjustment
+        trend_preference_score += adjustment
+        if adjustment >= 0.8:
+            reasons.append("近期演员兴趣上升")
+
     category_hits = []
     for name in base_categories:
         count = _combined_category_count(name, genre_counter, tag_counter)
@@ -2134,6 +2206,16 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         category_preference_score += boost
         feedback_score += boost
         reasons.append("近期互动题材")
+
+    category_trend = sum(float(trend_categories.get(category) or 0) * _generic_category_factor(category) for category in categories)
+    if category_trend:
+        adjustment = max(-2.0, min(3.5, category_trend * 8))
+        score += adjustment
+        personalized_score += adjustment
+        category_preference_score += adjustment
+        trend_preference_score += adjustment
+        if adjustment >= 0.8:
+            reasons.append("近期题材兴趣上升")
 
     outcome_signals: list[tuple[float, float]] = []
     actor_outcomes = outcome_model.get("actors") if isinstance(outcome_model.get("actors"), dict) else {}
@@ -2412,6 +2494,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "relationship_preference": round(relationship_preference_score, 1),
             "semantic_preference": round(semantic_preference_score, 1),
             "feedback": round(feedback_score, 1),
+            "trend": round(trend_preference_score, 1),
             "outcomes": round(outcome_calibration_score, 1),
             "recall_route": round(route_calibration_score, 1),
             "resources": round(actionability_score, 1),
@@ -2771,8 +2854,10 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     if source_mode not in {"latest", "full"}:
         source_mode = "latest"
     store = _ensure_store()
-    model_selection = _select_ranking_model(config, store)
     behavior = await preference_behavior_summary()
+    if _sync_core_conversion_stages(store, behavior.get("code_stages")):
+        _save_store(store)
+    model_selection = _select_ranking_model(config, store)
     route_evaluation = _route_evaluation(store)
     exploration_evaluation = _exploration_evaluation(store)
     feedback = {
@@ -2786,6 +2871,8 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "behavior_codes": Counter(behavior.get("codes") or {}),
         "behavior_actors": Counter(behavior.get("actor_identities") or behavior.get("actors") or {}),
         "behavior_categories": Counter(behavior.get("categories") or {}),
+        "trend_actors": dict((((behavior.get("trends") or {}).get("actors") or {}).get("deltas") or {})),
+        "trend_categories": dict((((behavior.get("trends") or {}).get("categories") or {}).get("deltas") or {})),
         "outcome_model": behavior.get("outcomes") or {},
         "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
         "exposure_penalties": _exposure_penalties(store),
@@ -3114,7 +3201,8 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         }
         data[key] = [x for x in data.get(key, []) if _norm_code(x.get("code") if isinstance(x, dict) else x) != code]
         data[key].insert(0, row)
-        _mark_exposure_converted(data, code, f"feedback:{kind}")
+        if kind == "like":
+            _mark_exposure_converted(data, code, "feedback:like")
         _save_store(data)
         _invalidate_recommendation_cache()
         return {"ok": True, "code": code, "kind": kind}
