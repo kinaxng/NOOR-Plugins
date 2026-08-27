@@ -20,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import semantic_tokens
+from app.knowledge.intelligence import actor_alias_names, semantic_tokens
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -1067,6 +1067,7 @@ async def _library_profile() -> dict[str, Any]:
                     profile["actor_category"][(actor, category)] += weight
         actor_names = {str(name) for name in profile["actors"] if str(name or "").strip()}
         semantic_actor_names = set(actor_names)
+        semantic_actor_names.update(actor_alias_names())
         try:
             actor_rows = await db.execute(select(KnowledgeEntity.label).where(KnowledgeEntity.entity_type == "actor"))
             semantic_actor_names.update(str(name).strip() for name in actor_rows.scalars() if str(name or "").strip())
