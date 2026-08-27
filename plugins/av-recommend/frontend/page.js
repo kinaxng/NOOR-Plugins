@@ -256,6 +256,7 @@ export async function mount(root, sdk) {
       ['覆盖', actorDiversity.unique || 0, `有效演员 ${actorDiversity.effective || 0}`],
       ['路线学习', `${activeRoutes}/${Object.keys(routes).length}`, `${stats.route_evaluation?.eligible || 0} 个成熟样本`],
       ['主题学习', `${activeTopics}/${Object.keys(topicMetrics).length}`, `${stats.topic_evaluation?.total_exposed || 0} 次主题曝光`],
+      ['当前意图', stats.session_intent?.event_count || 0, '12 小时渐进衰减'],
     ]
     for (const [name, value, desc] of cards) {
       const card = el('div', 'av-rec-stat')
@@ -344,6 +345,8 @@ export async function mount(root, sdk) {
           recall_sources: item.recall_sources || [],
           is_exploration: !!item.is_exploration,
           exploration_kind: item.exploration_kind || '',
+          interest_topic: item.interest_topic || {},
+          interest_topic_hypothesis: item.interest_topic_hypothesis || {},
         },
       })
       sdk.toast?.success(kind === 'ignore' ? '已忽略' : kind === 'like' ? '已标记喜欢' : '已标记不感兴趣')
@@ -363,6 +366,8 @@ export async function mount(root, sdk) {
           event_type: eventType,
           actors: item.actors || [],
           categories: item.categories || [],
+          interest_topic: item.interest_topic || {},
+          interest_topic_hypothesis: item.interest_topic_hypothesis || {},
           data,
         },
       })

@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 24
-PERSONALIZED_MODEL_VERSION = "personal-v24"
+RECOMMENDATION_ALGORITHM_VERSION = 25
+PERSONALIZED_MODEL_VERSION = "personal-v25"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -57,6 +57,15 @@ CONVERSION_STAGE_VALUES = {
     "download_submitted": 0.85,
     "library_imported": 1.0,
     "upgrade_completed": 1.0,
+}
+SESSION_INTENT_HALF_LIFE_MS = 3 * 60 * 60 * 1000
+SESSION_INTENT_MAX_AGE_MS = 12 * 60 * 60 * 1000
+SESSION_INTENT_EVENT_WEIGHTS = {
+    "detail_view": 0.35,
+    "feedback:like": 0.8,
+    "subscription": 1.0,
+    "download_intent": 1.15,
+    "download_submitted": 1.25,
 }
 QUALIFIED_CONVERSION_THRESHOLD = 0.50
 VERIFIED_CONVERSION_THRESHOLD = 0.95
@@ -639,7 +648,23 @@ def _feedback_counter(entries: Any, key: str) -> Counter:
             if text:
                 if key == "actors":
                     text = actor_identity_key(text)
+                elif key == "categories":
+                    text = canonical_preference_category(text)
+                if not text:
+                    continue
                 counter[text] += 1
+    return counter
+
+
+def _feedback_topic_counter(entries: Any) -> Counter:
+    counter: Counter = Counter()
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        topic = entry.get("interest_topic") or entry.get("interest_topic_hypothesis") or {}
+        topic_id = str(topic.get("id") or "").strip() if isinstance(topic, dict) else ""
+        if topic_id:
+            counter[topic_id] += 1
     return counter
 
 
@@ -760,18 +785,20 @@ def _ensure_store() -> dict[str, Any]:
     data_file = _data_file()
     data_file.parent.mkdir(parents=True, exist_ok=True)
     if not data_file.exists():
-        data = {"version": 2, "ignored": [], "liked": [], "disliked": [], "exposures": {}, "exposure_batches": []}
+        data = {"version": 3, "ignored": [], "liked": [], "disliked": [], "exposures": {}, "exposure_batches": [], "session_intents": []}
         data_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return data
     try:
         data = json.loads(data_file.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("invalid feedback store")
+        data["version"] = max(3, int(data.get("version") or 0))
         data.setdefault("ignored", [])
         data.setdefault("liked", [])
         data.setdefault("disliked", [])
         data.setdefault("exposures", {})
         data.setdefault("exposure_batches", [])
+        data.setdefault("session_intents", [])
         return data
     except Exception:
         backup = data_file.with_suffix(f".{int(time.time())}.bak")
@@ -788,6 +815,60 @@ def _save_store(data: dict[str, Any]) -> None:
     tmp = data_file.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(data_file)
+
+
+def _record_session_intent(store: dict[str, Any], payload: dict[str, Any], event_type: str, *, now_ms: int | None = None) -> bool:
+    weight = float(SESSION_INTENT_EVENT_WEIGHTS.get(event_type) or 0)
+    code = _norm_code(payload.get("code"))
+    if weight <= 0 or not code:
+        return False
+    now = int(now_ms or _now_ms())
+    topic = payload.get("interest_topic") or payload.get("interest_topic_hypothesis") or {}
+    topic_id = str(topic.get("id") or "").strip()[:64] if isinstance(topic, dict) else ""
+    actors = list(dict.fromkeys(actor_identity_key(value) for value in payload.get("actors") or [] if actor_identity_key(value)))[:8]
+    categories = list(dict.fromkeys(canonical_preference_category(value) for value in payload.get("categories") or [] if canonical_preference_category(value)))[:12]
+    rows = [row for row in store.get("session_intents") or [] if isinstance(row, dict) and now - int(row.get("created_at") or 0) <= SESSION_INTENT_MAX_AGE_MS]
+    if any(row.get("code") == code and row.get("event_type") == event_type and now - int(row.get("created_at") or 0) < 60_000 for row in rows[-12:]):
+        store["session_intents"] = rows[-300:]
+        return False
+    rows.append({"code": code, "event_type": event_type, "created_at": now, "weight": weight, "actors": actors, "categories": categories, "topic_id": topic_id})
+    store["session_intents"] = rows[-300:]
+    return True
+
+
+def _session_intent_summary(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    now = int(now_ms or _now_ms())
+    actors: Counter = Counter()
+    categories: Counter = Counter()
+    topics: Counter = Counter()
+    retained: list[dict[str, Any]] = []
+    for row in store.get("session_intents") or []:
+        if not isinstance(row, dict):
+            continue
+        age = max(0, now - int(row.get("created_at") or 0))
+        if age > SESSION_INTENT_MAX_AGE_MS:
+            continue
+        retained.append(row)
+        effective = float(row.get("weight") or 0) * math.pow(0.5, age / SESSION_INTENT_HALF_LIFE_MS)
+        for identity in row.get("actors") or []:
+            if identity:
+                actors[str(identity)] += effective
+        for category in row.get("categories") or []:
+            if category:
+                categories[str(category)] += effective
+        if row.get("topic_id"):
+            topics[str(row["topic_id"])] += effective
+    latest = max((int(row.get("created_at") or 0) for row in retained), default=0)
+    # Event insertion changes the revision; ordinary decay is refreshed by the
+    # recommendation TTL instead of creating a different cache key every second.
+    revision_source = f"{len(retained)}:{latest}"
+    return {
+        "event_count": len(retained),
+        "actors": dict(actors),
+        "categories": dict(categories),
+        "topics": dict(topics),
+        "revision": hashlib.sha256(revision_source.encode("utf-8")).hexdigest()[:16],
+    }
 
 
 def _exposure_penalties(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, float]:
@@ -2230,6 +2311,9 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     route_weights: dict[str, float] = feedback.get("route_weights") or {}
     interest_topics: list[dict[str, Any]] = feedback.get("interest_topics") or []
     topic_weights: dict[str, float] = feedback.get("topic_weights") or {}
+    liked_topics: Counter = feedback.get("liked_topics") or Counter()
+    disliked_topics: Counter = feedback.get("disliked_topics") or Counter()
+    session_intent: dict[str, Any] = feedback.get("session_intent") or {}
     exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
@@ -2265,6 +2349,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     route_calibration_score = 0.0
     trend_preference_score = 0.0
     interest_topic_score = 0.0
+    session_intent_score = 0.0
+    topic_feedback_adjustment = 0.0
     matched_interest_topic: dict[str, Any] | None = None
     passive_exposure_penalty = float(exposure_penalties.get(code) or 0)
     if passive_exposure_penalty > 0:
@@ -2378,9 +2464,10 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     feedback_category_boost = 0.0
     feedback_category_penalty = 0.0
     for category in categories:
+        category_key = canonical_preference_category(category)
         factor = _generic_category_factor(category)
-        feedback_category_boost += min(6, liked_categories.get(category, 0) * 3 * factor)
-        disliked_count = disliked_categories.get(category, 0)
+        feedback_category_boost += min(6, liked_categories.get(category_key, 0) * 3 * factor)
+        disliked_count = disliked_categories.get(category_key, 0)
         if disliked_count:
             feedback_category_penalty += min(16, (3 + disliked_count * 5) * factor)
     if feedback_category_boost:
@@ -2445,7 +2532,9 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             }
     interest_topic_hypothesis = dict(matched_interest_topic or {})
     if matched_interest_topic:
-        interest_topic_score *= float(topic_weights.get(str(matched_interest_topic.get("id") or "")) or 1.0)
+        topic_id = str(matched_interest_topic.get("id") or "")
+        interest_topic_score *= float(topic_weights.get(topic_id) or 1.0)
+        topic_feedback_adjustment = min(1.5, liked_topics.get(topic_id, 0) * 0.6) - min(2.5, disliked_topics.get(topic_id, 0) * 0.8)
     if interest_topic_score >= 0.5 and matched_interest_topic:
         score += interest_topic_score
         personalized_score += interest_topic_score
@@ -2454,6 +2543,27 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     else:
         interest_topic_score = 0.0
         matched_interest_topic = None
+
+    if topic_feedback_adjustment:
+        score += topic_feedback_adjustment
+        personalized_score += topic_feedback_adjustment
+        if topic_feedback_adjustment > 0:
+            feedback_score += topic_feedback_adjustment
+            reasons.append("组合主题正反馈")
+        else:
+            penalty_score += abs(topic_feedback_adjustment)
+            reasons.append("组合主题负反馈降权")
+
+    session_actor_strength = sum(float((session_intent.get("actors") or {}).get(identity) or 0) for identity in actor_identities)
+    session_category_strength = sum(float((session_intent.get("categories") or {}).get(category) or 0) * _generic_category_factor(category) for category in candidate_categories)
+    session_topic_id = str((matched_interest_topic or interest_topic_hypothesis).get("id") or "")
+    session_topic_strength = float((session_intent.get("topics") or {}).get(session_topic_id) or 0)
+    session_intent_score = min(2.8, session_actor_strength * 1.8) + min(2.0, session_category_strength * 0.8) + min(2.0, session_topic_strength * 1.5)
+    if session_intent_score >= 0.25:
+        score += session_intent_score
+        personalized_score += session_intent_score
+        trend_preference_score += session_intent_score
+        reasons.append("当前兴趣方向")
 
     outcome_signals: list[tuple[float, float]] = []
     actor_outcomes = outcome_model.get("actors") if isinstance(outcome_model.get("actors"), dict) else {}
@@ -2699,6 +2809,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         {"type": "semantic", "label": "标题语义", "score": round(semantic_preference_score, 1)},
         {"type": "trend", "label": "近期趋势", "score": round(trend_preference_score, 1)},
         {"type": "topic", "label": "组合兴趣主题", "score": round(interest_topic_score, 1), "evidence": matched_interest_topic or {}},
+        {"type": "session", "label": "当前兴趣方向", "score": round(session_intent_score, 1)},
         {"type": "outcome", "label": "入库结果校准", "score": round(outcome_calibration_score, 1)},
         {"type": "resource", "label": "资源可用性", "score": round(actionability_score, 1)},
         {"type": "quality", "label": "作品质量", "score": round(quality_score, 1)},
@@ -2762,6 +2873,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "feedback": round(feedback_score, 1),
             "trend": round(trend_preference_score, 1),
             "interest_topic": round(interest_topic_score, 1),
+            "session_intent": round(session_intent_score, 1),
             "outcomes": round(outcome_calibration_score, 1),
             "recall_route": round(route_calibration_score, 1),
             "resources": round(actionability_score, 1),
@@ -3236,6 +3348,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     route_evaluation = _route_evaluation(store)
     exploration_evaluation = _exploration_evaluation(store)
     topic_evaluation = _topic_evaluation(store)
+    session_intent = _session_intent_summary(store)
     feedback = {
         "ignored_codes": _feedback_codes(store.get("ignored")),
         "liked_codes": _feedback_codes(store.get("liked")),
@@ -3244,6 +3357,8 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "liked_categories": _feedback_counter(store.get("liked"), "categories"),
         "disliked_actors": _feedback_counter(store.get("disliked"), "actors"),
         "disliked_categories": _feedback_counter(store.get("disliked"), "categories"),
+        "liked_topics": _feedback_topic_counter(store.get("liked")),
+        "disliked_topics": _feedback_topic_counter(store.get("disliked")),
         "behavior_codes": Counter(behavior.get("codes") or {}),
         "behavior_actors": Counter(behavior.get("actor_identities") or behavior.get("actors") or {}),
         "behavior_categories": Counter(behavior.get("categories") or {}),
@@ -3252,6 +3367,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "outcome_model": behavior.get("outcomes") or {},
         "interest_topics": list((behavior.get("interest_topics") or {}).get("topics") or []),
         "topic_weights": {topic_id: float(metric.get("weight") or 1) for topic_id, metric in (topic_evaluation.get("topics") or {}).items()},
+        "session_intent": session_intent,
         "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
         "exposure_penalties": _exposure_penalties(store),
     }
@@ -3279,6 +3395,9 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "exposure_penalties": feedback["exposure_penalties"],
         "route_weights": feedback["route_weights"],
         "topic_weights": feedback["topic_weights"],
+        "liked_topics": dict(feedback["liked_topics"]),
+        "disliked_topics": dict(feedback["disliked_topics"]),
+        "session_intent_revision": session_intent["revision"],
         "source_mode": source_mode,
         "requested_limit": requested_limit,
     }, sort_keys=True, ensure_ascii=False)
@@ -3315,6 +3434,9 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "exposure_penalties": feedback["exposure_penalties"],
         "route_weights": feedback["route_weights"],
         "topic_weights": feedback["topic_weights"],
+        "liked_topics": dict(feedback["liked_topics"]),
+        "disliked_topics": dict(feedback["disliked_topics"]),
+        "session_intent_revision": session_intent["revision"],
         "library_codes": sorted(live_codes),
         "library_code_count": len(profile.get("codes") or []),
         "library_code_fingerprint": _code_fingerprint(profile.get("codes") or set()),
@@ -3483,6 +3605,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "top_series": _top(profile.get("series") or Counter(), 8),
             "top_directors": _top(profile.get("directors") or Counter(), 8),
             "top_interest_topics": list((behavior.get("interest_topics") or {}).get("topics") or [])[:8],
+            "current_intent": session_intent,
         },
         "stats": {
             "candidates": len(candidates),
@@ -3498,6 +3621,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "route_evaluation": route_evaluation,
             "exploration_evaluation": exploration_evaluation,
             "topic_evaluation": topic_evaluation,
+            "session_intent": {"event_count": session_intent["event_count"], "revision": session_intent["revision"]},
             "exploration": {
                 "adaptive": bool(config.get("adaptive_exploration_enabled", True)),
                 "ratio": round(float(controls_config.get("exploration_ratio") or 0), 3),
@@ -3638,11 +3762,14 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
             "recall_sources": [str(x).strip() for x in (payload.get("recall_sources") or []) if str(x or "").strip()][:8],
             "is_exploration": bool(payload.get("is_exploration")),
             "exploration_kind": str(payload.get("exploration_kind") or "")[:64],
+            "interest_topic": payload.get("interest_topic") if isinstance(payload.get("interest_topic"), dict) else {},
+            "interest_topic_hypothesis": payload.get("interest_topic_hypothesis") if isinstance(payload.get("interest_topic_hypothesis"), dict) else {},
         }
         data[key] = [x for x in data.get(key, []) if _norm_code(x.get("code") if isinstance(x, dict) else x) != code]
         data[key].insert(0, row)
         if kind == "like":
             _mark_exposure_converted(data, code, "feedback:like")
+            _record_session_intent(data, row, "feedback:like")
         _save_store(data)
         _invalidate_recommendation_cache()
         return {"ok": True, "code": code, "kind": kind}
@@ -3657,11 +3784,12 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         )
         data = _ensure_store()
         converted = _mark_exposure_converted(data, payload.get("code"), str(payload.get("event_type") or "interaction"))
-        if converted:
+        intent_recorded = _record_session_intent(data, payload, str(payload.get("event_type") or "interaction"))
+        if converted or intent_recorded:
             _save_store(data)
-        if created or converted:
-            _invalidate_recommendation_cache()
-        return {"ok": True, "created": created, "exposure_converted": converted}
+        if created or converted or intent_recorded:
+            _invalidate_recommendation_cache(hard=False, reason="session-intent")
+        return {"ok": True, "created": created, "exposure_converted": converted, "session_intent_recorded": intent_recorded}
     if action == "exposure":
         data = _ensure_store()
         before = _exposure_penalties(data)
