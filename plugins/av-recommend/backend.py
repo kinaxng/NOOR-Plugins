@@ -45,8 +45,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 11
-PERSONALIZED_MODEL_VERSION = "personal-v11"
+RECOMMENDATION_ALGORITHM_VERSION = 12
+PERSONALIZED_MODEL_VERSION = "personal-v12"
 STABLE_MODEL_VERSION = "stable-v1"
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
@@ -2114,6 +2114,10 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "confidence": confidence,
         "confidence_interval": {"lower": max(0, confidence - uncertainty_radius), "upper": min(100, confidence + uncertainty_radius), "reliability": round(evidence_reliability, 3)},
         "outcome_calibration": round(outcome_calibration_score, 1),
+        "neighbor_score": round(neighbor_score, 3),
+        "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
+        "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
+        "recall_sources": list(item.get("recall_sources") or []),
         "score_breakdown": {
             "preference": round(personalized_score, 1),
             "actor_preference": round(actor_preference_score, 1),
@@ -2526,6 +2530,10 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                     item["source_tags"] = list(persisted.get("source_tags") or [])
                 item["is_today_increment"] = bool(persisted.get("is_today_increment"))
 
+    base_recall_source = "candidate-pool" if source_mode == "full" else "javdb-feed"
+    for item in candidates:
+        item["recall_sources"] = list(dict.fromkeys([*(item.get("recall_sources") or []), base_recall_source]))
+
     try:
         from app.knowledge.intelligence import work_similarity_candidates
         similarity_meta = await work_similarity_candidates(profile.get("code_weights") or {code: 1.0 for code in profile.get("codes") or set()}, limit=160)
@@ -2538,11 +2546,14 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             if existing is None:
                 existing = dict(neighbor)
                 existing["source_tags"] = [{"id": "intelligence-neighbor", "label": "Core 邻域"}]
+                existing["recall_sources"] = ["core-neighbor"]
                 candidates.append(existing)
                 by_code[code] = existing
             else:
                 existing["neighbor_score"] = neighbor.get("neighbor_score")
+                existing["neighbor_confidence"] = neighbor.get("neighbor_confidence")
                 existing["neighbor_evidence"] = neighbor.get("neighbor_evidence") or []
+                existing["recall_sources"] = list(dict.fromkeys([*(existing.get("recall_sources") or []), "core-neighbor"]))
                 for key in ("actors", "categories", "maker", "series", "director", "cover_url", "release_date"):
                     if not existing.get(key) and neighbor.get(key):
                         existing[key] = neighbor[key]
@@ -2623,7 +2634,16 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "disliked": len([x for x in feedback["disliked_codes"] if x]),
             "cold_start": {"active": cold_start_strength > 0, "strength": round(cold_start_strength, 3), "threshold": cold_start_threshold},
             "model_evaluation": _model_evaluation(store),
-            "neighbor_recall": {"seeds": int(similarity_meta.get("seed_count") or 0), "candidates": len(similarity_meta.get("items") or []), "linked_works": int(similarity_meta.get("linked_work_count") or 0)},
+            "neighbor_recall": {
+                "seeds": int(similarity_meta.get("seed_count") or 0),
+                "candidates": len(similarity_meta.get("items") or []),
+                "linked_works": int(similarity_meta.get("linked_work_count") or 0),
+                "scored": sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0),
+                "selected": sum(1 for item in scored if "core-neighbor" in (item.get("recall_sources") or [])),
+                "core_only_selected": sum(1 for item in scored if (item.get("recall_sources") or []) == ["core-neighbor"]),
+                "feed_overlap_selected": sum(1 for item in scored if "core-neighbor" in (item.get("recall_sources") or []) and base_recall_source in (item.get("recall_sources") or [])),
+                "average_confidence": round(sum(float(item.get("neighbor_confidence") or 0) for item in scored if float(item.get("neighbor_score") or 0) > 0) / max(1, sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0)), 3),
+            },
         },
         "candidate_meta": {"pool": _candidate_pool_stats(pool)},
         "filtered": _filtered_summary(filtered_diagnostics),
