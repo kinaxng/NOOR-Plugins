@@ -20,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, canonical_actor_name, semantic_tokens
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, canonical_actor_name, clear_preference_events, preference_behavior_summary, record_preference_event, semantic_tokens
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -1538,6 +1538,9 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     disliked_categories: Counter = feedback.get("disliked_categories") or Counter()
     liked_actors: Counter = feedback.get("liked_actors") or Counter()
     liked_categories: Counter = feedback.get("liked_categories") or Counter()
+    behavior_codes: Counter = feedback.get("behavior_codes") or Counter()
+    behavior_actors: Counter = feedback.get("behavior_actors") or Counter()
+    behavior_categories: Counter = feedback.get("behavior_categories") or Counter()
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
         return None
@@ -1616,6 +1619,15 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         penalty_score += feedback_actor_penalty
         reasons.append("负反馈演员降权")
 
+    behavior_actor_strength = sum(float(behavior_actors.get(actor) or 0) for actor in actors)
+    if behavior_actor_strength > 0:
+        boost = min(5, math.log2(behavior_actor_strength + 1) * 2.2)
+        score += boost
+        personalized_score += boost
+        actor_preference_score += boost
+        feedback_score += boost
+        reasons.append("近期互动演员")
+
     category_hits = []
     for name in base_categories:
         count = _combined_category_count(name, genre_counter, tag_counter)
@@ -1669,6 +1681,15 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         score -= feedback_category_penalty
         penalty_score += feedback_category_penalty
         reasons.append("负反馈类型降权")
+
+    behavior_category_strength = sum(float(behavior_categories.get(category) or 0) * _generic_category_factor(category) for category in categories)
+    if behavior_category_strength > 0:
+        boost = min(4, math.log2(behavior_category_strength + 1) * 1.8)
+        score += boost
+        personalized_score += boost
+        category_preference_score += boost
+        feedback_score += boost
+        reasons.append("近期互动题材")
 
     combo_hits = []
     for actor in actors:
@@ -1755,6 +1776,13 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         score += 20
         feedback_score += 20
         reasons.append("已标记喜欢")
+    behavior_code_strength = float(behavior_codes.get(code) or 0)
+    if behavior_code_strength > 0:
+        boost = min(5, behavior_code_strength * 2.2)
+        score += boost
+        personalized_score += boost
+        feedback_score += boost
+        reasons.append("近期查看意向")
     release = str(item.get("release_date") or item.get("date") or "")
     if release.startswith("2026"):
         score += 4
@@ -2144,6 +2172,7 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     if source_mode not in {"latest", "full"}:
         source_mode = "latest"
     store = _ensure_store()
+    behavior = await preference_behavior_summary()
     feedback = {
         "ignored_codes": _feedback_codes(store.get("ignored")),
         "liked_codes": _feedback_codes(store.get("liked")),
@@ -2152,6 +2181,9 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
         "liked_categories": _feedback_counter(store.get("liked"), "categories"),
         "disliked_actors": _feedback_counter(store.get("disliked"), "actors"),
         "disliked_categories": _feedback_counter(store.get("disliked"), "categories"),
+        "behavior_codes": Counter(behavior.get("codes") or {}),
+        "behavior_actors": Counter(behavior.get("actors") or {}),
+        "behavior_categories": Counter(behavior.get("categories") or {}),
     }
     requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
     cache_ttl = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
@@ -2163,6 +2195,7 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
         "kind": "request-v3",
         "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
         "actor_alias_revision": actor_alias_revision(),
+        "behavior_revision": behavior.get("revision"),
         "config": config,
         "ignored": sorted(feedback["ignored_codes"]),
         "liked": sorted(feedback["liked_codes"]),
@@ -2184,6 +2217,7 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     cache_key = json.dumps({
         "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
         "actor_alias_revision": actor_alias_revision(),
+        "behavior_revision": behavior.get("revision"),
         "config": config,
         "ignored": sorted(feedback["ignored_codes"]),
         "liked": sorted(feedback["liked_codes"]),
@@ -2349,12 +2383,25 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         _save_store(data)
         _invalidate_recommendation_cache()
         return {"ok": True, "code": code, "kind": kind}
+    if action == "behavior":
+        created = await record_preference_event(
+            str(payload.get("code") or ""),
+            str(payload.get("event_type") or ""),
+            source="av-recommend",
+            actors=list(payload.get("actors") or []),
+            categories=list(payload.get("categories") or []),
+            data=payload.get("data") if isinstance(payload.get("data"), dict) else {},
+        )
+        if created:
+            _invalidate_recommendation_cache()
+        return {"ok": True, "created": created}
     if action == "reset_feedback":
         data = _ensure_store()
         data["ignored"] = []
         data["liked"] = []
         data["disliked"] = []
         _save_store(data)
+        await clear_preference_events(source="av-recommend")
         _invalidate_recommendation_cache()
         return {"ok": True}
     raise ValueError(f"unsupported action: {action}")

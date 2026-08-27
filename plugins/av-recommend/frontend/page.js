@@ -327,6 +327,24 @@ export async function mount(root, sdk) {
     }
   }
 
+  async function recordBehavior(item, eventType, data = {}) {
+    const code = detailCode(item)
+    if (!code) return
+    try {
+      await sdk.api.post('/plugins/av-recommend/actions/behavior', {
+        payload: {
+          code,
+          event_type: eventType,
+          actors: item.actors || [],
+          categories: item.categories || [],
+          data,
+        },
+      })
+    } catch (_) {
+      // Behavior evidence must never block the user's primary action.
+    }
+  }
+
   function openDislikePicker(item) {
     const mask = el('div', 'av-rec-feedback-mask')
     const modal = el('div', 'av-rec-feedback-modal')
@@ -409,7 +427,10 @@ export async function mount(root, sdk) {
       if (sdk.subscription?.open) {
         return sdk.subscription.open({
           ...payload,
-          onSuccess: result => sdk.toast?.success?.(result?.created ? '订阅已创建' : '订阅已存在'),
+          onSuccess: result => {
+            sdk.toast?.success?.(result?.created ? '订阅已创建' : '订阅已存在')
+            recordBehavior(item, 'subscription', { created: !!result?.created })
+          },
         })
       }
       const resp = await sdk.api.post('/plugins/subscription-core/actions/create', {
@@ -422,6 +443,7 @@ export async function mount(root, sdk) {
         },
       })
       sdk.toast?.success?.(resp?.data?.created ? '订阅已创建' : '订阅已存在')
+      await recordBehavior(item, 'subscription', { created: !!resp?.data?.created })
     } catch (e) {
       sdk.toast?.error?.(e?.response?.data?.detail || e?.message || '订阅失败')
     }
@@ -477,6 +499,7 @@ export async function mount(root, sdk) {
       const expectedMagnetsCount = Number(item?.magnets_count || item?.magnet_count || 0)
       const res = await sdk.api.post('/plugins/javdb/actions/video', { payload: { code, expected_magnets_count: expectedMagnetsCount } })
       const video = res.data?.data || {}
+      recordBehavior({ ...item, ...video }, 'detail_view')
       panel.body.innerHTML = ''
 
       const content = el('div', 'av-rec-detail')
@@ -684,6 +707,10 @@ export async function mount(root, sdk) {
                   url: resolvedUrl,
                   title: detailTitle(video),
                   rename: detailTitle(video),
+                })
+                await recordBehavior({ ...item, ...video }, 'download_intent', {
+                  provider: resource.provider || '',
+                  downloader_id: downloaderId,
                 })
               } catch (e) {
                 sdk.toast?.error?.(e?.response?.data?.detail || e?.message || '推送失败')
