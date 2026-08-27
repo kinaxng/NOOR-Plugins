@@ -45,8 +45,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 14
-PERSONALIZED_MODEL_VERSION = "personal-v14"
+RECOMMENDATION_ALGORITHM_VERSION = 16
+PERSONALIZED_MODEL_VERSION = "personal-v16"
 STABLE_MODEL_VERSION = "stable-v1"
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
@@ -60,6 +60,7 @@ _profile_enrichment_task: asyncio.Task[None] | None = None
 _profile_enrichment_pending: dict[str, dict[str, Any]] = {}
 _profile_enrichment_attempts: dict[str, float] = {}
 _profile_enrichment_state: dict[str, Any] = {"status": "idle", "queued": 0, "enriched": 0, "failed": 0, "last_finished_at": None, "last_error": ""}
+_title_profile_refresh_task: asyncio.Task[None] | None = None
 
 
 def _recommendation_cache_id(cache_key: str) -> str:
@@ -745,6 +746,7 @@ def _mark_exposure_converted(store: dict[str, Any], code: Any, event_type: str =
     row["converted_model"] = str(row.get("last_model") or "unknown")
     row["converted_rank"] = int(row.get("last_rank") or 0)
     row["converted_routes"] = list(row.get("last_routes") or [])
+    row["converted_strategy"] = str(row.get("last_strategy") or "ranking")
     return True
 
 
@@ -785,6 +787,18 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
             })
             route_evidence[route] = evidence
         row["last_routes"] = list(dict.fromkeys(routes))
+        strategy = "exploration" if item.get("is_exploration") else "ranking"
+        strategies = row.setdefault("strategies", {})
+        strategy_evidence = strategies.get(strategy) if isinstance(strategies.get(strategy), dict) else {}
+        strategy_evidence.update({
+            "batch_count": int(strategy_evidence.get("batch_count") or 0) + 1,
+            "first_seen_at": int(strategy_evidence.get("first_seen_at") or now),
+            "last_seen_at": now,
+            "last_rank": max(0, int(item.get("rank") or 0)),
+        })
+        strategies[strategy] = strategy_evidence
+        row["last_strategy"] = strategy
+        row["exploration_kind"] = str(item.get("exploration_kind") or "")[:64]
         model_version = str(item.get("model_version") or "unknown")[:64]
         rank = max(0, int(item.get("rank") or 0))
         score_value = float(item.get("score") or 0)
@@ -894,6 +908,51 @@ def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> di
             "weight": round(factor, 3),
         })
     return {"routes": routes, "eligible": eligible_rows, "converted": converted_rows, "prior": {"alpha": 2, "beta": 8}, "generated_at": now_ms}
+
+
+def _exploration_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    """Compare exploration and normal ranking using converted or mature cohorts."""
+    now_ms = int(now_ms or _now_ms())
+    mature_age_ms = 7 * 86400 * 1000
+    cohorts = {"exploration": {"exposed": 0, "impressions": 0, "converted": 0}, "ranking": {"exposed": 0, "impressions": 0, "converted": 0}}
+    for row in (store.get("exposures") or {}).values():
+        if not isinstance(row, dict):
+            continue
+        converted = bool(row.get("converted_at"))
+        if not converted and now_ms - int(row.get("first_seen_at") or now_ms) < mature_age_ms:
+            continue
+        converted_strategy = str(row.get("converted_strategy") or row.get("last_strategy") or "ranking") if converted else ""
+        for strategy, evidence in (row.get("strategies") or {}).items():
+            if strategy not in cohorts or not isinstance(evidence, dict):
+                continue
+            cohorts[strategy]["exposed"] += 1
+            cohorts[strategy]["impressions"] += int(evidence.get("batch_count") or 0)
+            cohorts[strategy]["converted"] += int(converted and strategy == converted_strategy)
+    for metric in cohorts.values():
+        exposed, converted = int(metric["exposed"]), int(metric["converted"])
+        posterior = (converted + 2) / (exposed + 10)
+        lower, upper = _wilson_interval(converted, exposed)
+        metric.update({
+            "conversion_rate": round(converted / max(exposed, 1), 4),
+            "posterior_rate": round(posterior, 4),
+            "conversion_interval": {"lower": round(lower, 4), "upper": round(upper, 4)},
+            "reliability": round(exposed / (exposed + 20), 3),
+        })
+    return {"cohorts": cohorts, "minimum_adaptation_sample": 20, "prior": {"alpha": 2, "beta": 8}, "generated_at": now_ms}
+
+
+def _negative_neighbor_seed_weights(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, float]:
+    now_ms = int(now_ms or _now_ms())
+    weights: dict[str, float] = {}
+    for item in store.get("disliked") or []:
+        if not isinstance(item, dict):
+            continue
+        code = _norm_code(item.get("code"))
+        if not code:
+            continue
+        age_days = max(0.0, (now_ms - int(item.get("created_at") or now_ms)) / 86400 / 1000)
+        weights[code] = max(weights.get(code, 0.0), max(0.25, math.pow(0.5, age_days / 180)))
+    return weights
 
 
 def _select_ranking_model(config: dict[str, Any], store: dict[str, Any]) -> dict[str, str]:
@@ -1156,11 +1215,19 @@ def _work_profile_actor_names(work: WorkProfile) -> set[str]:
 def _prune_title_term_counter(counter: Counter) -> Counter:
     trait_labels = {str(trait.get("name") or "") for trait in TITLE_TRAIT_PATTERNS}
     items = [(str(term), float(count)) for term, count in counter.items() if str(term).strip() and float(count or 0) > 0]
+    containing_max: dict[str, float] = defaultdict(float)
+    for longer, longer_count in items:
+        for width in (1, 2):
+            if len(longer) <= width:
+                continue
+            for index in range(len(longer) - width + 1):
+                fragment = longer[index:index + width]
+                containing_max[fragment] = max(containing_max[fragment], longer_count)
     kept: Counter = Counter()
     for term, count in sorted(items, key=lambda row: (len(row[0]), -row[1])):
         if term in trait_labels:
             continue
-        if len(term) <= 2 and any(term != longer and term in longer and len(longer) > len(term) and longer_count >= count * 0.5 for longer, longer_count in items):
+        if len(term) <= 2 and containing_max.get(term, 0) >= count * 0.5:
             continue
         kept[term] = count
     return kept
@@ -1194,7 +1261,13 @@ def _entity_payload(entity: KnowledgeEntity) -> dict[str, Any]:
 
 
 def _media_preference_weight(entity: KnowledgeEntity) -> float:
-    observed_at = entity.updated_at or entity.created_at
+    data = entity.data if isinstance(entity.data, dict) else {}
+    observed_at = None
+    raw_created = str(data.get("date_created") or "").strip()
+    if raw_created:
+        with contextlib.suppress(ValueError):
+            observed_at = dt.datetime.fromisoformat(raw_created.replace("Z", "+00:00"))
+    observed_at = observed_at or entity.updated_at or entity.created_at
     if not observed_at:
         return 1.0
     try:
@@ -1203,6 +1276,7 @@ def _media_preference_weight(entity: KnowledgeEntity) -> float:
         age_days = max(0.0, (dt.datetime.now(dt.timezone.utc) - observed_at.astimezone(dt.timezone.utc)).total_seconds() / 86400)
     except Exception:
         return 1.0
+    age_days = math.floor(age_days)
     if age_days <= 90:
         return 1.0
     return max(0.35, math.pow(0.5, (age_days - 90) / 540))
@@ -1235,13 +1309,15 @@ def _title_profile_signature(media: list[KnowledgeEntity], media_weights: dict[s
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _load_title_profile_cache(signature: str) -> dict[str, Counter] | None:
+def _load_title_profile_cache(signature: str | None = None) -> dict[str, Counter] | None:
     title_profile_file = _title_profile_file()
     try:
         data = json.loads(title_profile_file.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if not isinstance(data, dict) or data.get("signature") != signature or int(data.get("version") or 0) != TITLE_PROFILE_VERSION:
+    if not isinstance(data, dict) or int(data.get("version") or 0) != TITLE_PROFILE_VERSION:
+        return None
+    if signature and data.get("signature") != signature:
         return None
     return {
         "title_traits": Counter({str(key): float(value) for key, value in (data.get("title_traits") or {}).items()}),
@@ -1265,9 +1341,28 @@ def _save_title_profile_cache(signature: str, title_traits: Counter, title_terms
     temporary.replace(title_profile_file)
 
 
+def _schedule_title_profile_refresh(signature: str, media: list[KnowledgeEntity], media_weights: dict[str, float], actor_names: set[str]) -> None:
+    global _title_profile_refresh_task
+    if _title_profile_refresh_task and not _title_profile_refresh_task.done():
+        return
+
+    async def refresh() -> None:
+        try:
+            rebuilt = await asyncio.to_thread(_build_title_profile, list(media), dict(media_weights), set(actor_names))
+            _save_title_profile_cache(signature, rebuilt["title_traits"], rebuilt["title_terms"], len(media))
+            _invalidate_recommendation_cache()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    _title_profile_refresh_task = asyncio.create_task(refresh())
+
+
 def _build_title_profile(media: list[KnowledgeEntity], media_weights: dict[str, float], actor_names: set[str]) -> dict[str, Counter]:
     title_traits: Counter = Counter()
     title_terms: Counter = Counter()
+    actor_keys = _actor_name_keys(actor_names)
     for item in media:
         payload = _title_profile_media_payload(item)
         weight = media_weights.get(item.id, 1.0)
@@ -1276,7 +1371,8 @@ def _build_title_profile(media: list[KnowledgeEntity], media_weights: dict[str, 
             if name:
                 title_traits[name] += weight * float(tag.get("weight") or 1.0)
         for term in _title_mined_terms(payload, 80):
-            if not _is_actor_name_term(term, actor_names):
+            term_key = _norm_key(re.sub(r"[\s\u3000・·._\-]", "", str(term)))
+            if term_key not in actor_keys:
                 title_terms[term] += weight
     return {"title_traits": title_traits, "title_terms": _prune_title_term_counter(title_terms)}
 
@@ -1399,20 +1495,19 @@ async def _library_profile() -> dict[str, Any]:
         signature = _title_profile_signature(media, media_weights)
         title_profile = _load_title_profile_cache(signature)
         if title_profile is None:
-            title_profile = _build_title_profile(media, media_weights, actor_names)
-            with contextlib.suppress(Exception):
-                _save_title_profile_cache(signature, title_profile["title_traits"], title_profile["title_terms"], len(media))
+            title_profile = _load_title_profile_cache() or {"title_traits": Counter(), "title_terms": Counter()}
+            _schedule_title_profile_refresh(signature, media, media_weights, actor_names)
         profile["title_traits"] = title_profile["title_traits"]
         if semantic_work_weights:
             try:
                 work_rows = await db.execute(select(WorkProfile).where(WorkProfile.code.in_(semantic_work_weights)))
                 for work in work_rows.scalars().all():
                     weight = semantic_work_weights.get(work.code, 1.0)
-                    work_actor_keys = semantic_actor_keys | _actor_name_keys(_work_profile_actor_names(work))
+                    work_actor_keys = _actor_name_keys(_work_profile_actor_names(work))
                     weighted_terms = (work.tokens or {}).get("weighted") if isinstance(work.tokens, dict) else {}
                     for term, term_weight in (weighted_terms or {}).items():
                         term_key = _norm_key(re.sub(r"[\s\u3000・·._\-]", "", str(term)))
-                        if len(str(term)) >= 2 and term_key not in work_actor_keys:
+                        if len(str(term)) >= 2 and term_key not in semantic_actor_keys and term_key not in work_actor_keys:
                             profile["semantic_terms"][str(term)] += weight * float(term_weight or 0)
                 profile["semantic_terms"] = Counter(dict(profile["semantic_terms"].most_common(2400)))
             except SQLAlchemyError:
@@ -1777,14 +1872,18 @@ async def _scheduler_loop() -> None:
             minutes = _scan_interval_minutes(config)
             enabled = config.get("full_scan_background_enabled", True)
             scanned_pool = False
-            if enabled and _pool_scan_due(_pool(), minutes):
-                await _scan_candidate_pool(config)
-                scanned_pool = True
+            # Warm the interactive page before any overdue full-pool
+            # maintenance. A large scan must never delay the normal route.
             await _prewarm_recommendations(
                 config,
                 force=bool(_prewarm_state.get("last_finished_at")),
-                include_full=scanned_pool,
+                include_full=False,
             )
+            if enabled and _pool_scan_due(_pool(), minutes):
+                await _scan_candidate_pool(config)
+                scanned_pool = True
+            if scanned_pool:
+                await _prewarm_recommendations(config, force=True, include_full=True)
             cache_minutes = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440))
             wake_minutes = max(4, min(minutes, int(cache_minutes * 0.8)))
         except asyncio.CancelledError:
@@ -1807,7 +1906,7 @@ async def start_background(_config: dict[str, Any] | None = None) -> None:
 
 
 async def stop_background() -> None:
-    global _scheduler_task, _scheduler_stop, _profile_enrichment_task
+    global _scheduler_task, _scheduler_stop, _profile_enrichment_task, _title_profile_refresh_task
     if _scheduler_stop:
         _scheduler_stop.set()
     if _scheduler_task:
@@ -1820,6 +1919,11 @@ async def stop_background() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await _profile_enrichment_task
     _profile_enrichment_task = None
+    if _title_profile_refresh_task:
+        _title_profile_refresh_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _title_profile_refresh_task
+    _title_profile_refresh_task = None
     _scheduler_stop = None
 
 
@@ -2183,6 +2287,12 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
                 if label and label not in labels:
                     labels.append(label)
         reasons.insert(min(2, len(reasons)), "邻域相似" + ("：" + "/".join(labels[:3]) if labels else ""))
+    neighbor_negative_score = float(item.get("neighbor_negative_score") or 0)
+    if neighbor_negative_score > 0:
+        penalty = min(12, math.log2(1 + neighbor_negative_score) * 5.5)
+        score -= penalty
+        penalty_score += penalty
+        reasons.append("与不感兴趣作品相似")
     recall_sources = list(item.get("recall_sources") or [])
     learned_route_weights = [float(route_weights.get(route) or 1.0) for route in recall_sources if route in route_weights]
     if learned_route_weights:
@@ -2290,6 +2400,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "neighbor_score": round(neighbor_score, 3),
         "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
         "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
+        "neighbor_negative_score": round(neighbor_negative_score, 3),
+        "neighbor_negative_evidence": list(item.get("neighbor_negative_evidence") or [])[:3],
         "recall_sources": recall_sources,
         "portrait_completeness": dict(item.get("completeness") or item.get("portrait_completeness") or {}),
         "portrait_sources": dict(item.get("field_sources") or item.get("portrait_sources") or {}),
@@ -2552,6 +2664,45 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
     return selected
 
 
+def _shortlist_candidates(items: list[dict[str, Any]], profile: dict[str, Any], *, limit: int = 420) -> list[dict[str, Any]]:
+    """Cheap recall-stage ranking before expensive semantic and outcome scoring."""
+    if len(items) <= limit:
+        return items
+    actor_counter: Counter = profile.get("actor_identities") or Counter()
+    genre_counter: Counter = profile.get("genres") or Counter()
+    tag_counter: Counter = profile.get("tags") or Counter()
+    studio_counter: Counter = profile.get("studios") or Counter()
+    series_counter: Counter = profile.get("series") or Counter()
+    director_counter: Counter = profile.get("directors") or Counter()
+    current_year = dt.date.today().year
+
+    def recall_value(item: dict[str, Any]) -> float:
+        actors = [actor_identity_key(name) for name in (item.get("actors") or [])[:8]]
+        categories = [str(name) for name in (item.get("categories") or [])[:12]]
+        value = sum(math.log2(float(actor_counter.get(actor) or 0) + 1) * 4 for actor in actors)
+        value += sum(math.log2(float(genre_counter.get(name) or tag_counter.get(name) or 0) + 1) * _generic_category_factor(name) for name in categories)
+        value += math.log2(float(studio_counter.get(_name_one(item.get("maker"))) or 0) + 1) * 2
+        value += math.log2(float(series_counter.get(_name_one(item.get("series"))) or 0) + 1) * 3
+        value += math.log2(float(director_counter.get(_name_one(item.get("director"))) or 0) + 1) * 1.5
+        value += math.log2(float(item.get("neighbor_score") or 0) + 1) * 3
+        release = str(item.get("release_date") or item.get("date") or "")
+        value += 2.5 if release.startswith(str(current_year)) else 1 if release.startswith(str(current_year - 1)) else 0
+        value += min(2.0, float(item.get("magnets_count") or 0) * 0.25)
+        completeness = item.get("completeness") if isinstance(item.get("completeness"), dict) else {}
+        value += sum(bool(completeness.get(key)) for key in ("title", "cover", "actors", "categories")) * 0.35
+        return value
+
+    ranked = sorted(items, key=lambda item: (recall_value(item), str(item.get("release_date") or "")), reverse=True)
+    exploit_count = max(1, int(limit * 0.82))
+    selected = ranked[:exploit_count]
+    selected_codes = {_candidate_code(item) for item in selected}
+    discovery = [item for item in ranked[exploit_count:] if _candidate_code(item) not in selected_codes]
+    seed = dt.date.today().isoformat()
+    discovery.sort(key=lambda item: hashlib.sha256(f"{seed}:{_candidate_code(item)}".encode("utf-8")).digest())
+    selected.extend(discovery[:limit - len(selected)])
+    return selected
+
+
 def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str, Any], limit: int) -> list[dict[str, Any]]:
     """Reserve deterministic, uncertainty-aware exploration without displacing the strong majority."""
     threshold = int(_config_number(config, "minimum_confidence_threshold", 0, 0, 80))
@@ -2623,6 +2774,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     model_selection = _select_ranking_model(config, store)
     behavior = await preference_behavior_summary()
     route_evaluation = _route_evaluation(store)
+    exploration_evaluation = _exploration_evaluation(store)
     feedback = {
         "ignored_codes": _feedback_codes(store.get("ignored")),
         "liked_codes": _feedback_codes(store.get("liked")),
@@ -2728,7 +2880,11 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
 
     try:
         from app.knowledge.intelligence import work_similarity_candidates
-        similarity_meta = await work_similarity_candidates(profile.get("code_weights") or {code: 1.0 for code in profile.get("codes") or set()}, limit=160)
+        similarity_meta = await work_similarity_candidates(
+            profile.get("code_weights") or {code: 1.0 for code in profile.get("codes") or set()},
+            negative_seed_weights=_negative_neighbor_seed_weights(store),
+            limit=160,
+        )
         by_code = {_candidate_code(item): item for item in candidates if _candidate_code(item)}
         for neighbor in similarity_meta.get("items") or []:
             code = _candidate_code(neighbor)
@@ -2745,6 +2901,8 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 existing["neighbor_score"] = neighbor.get("neighbor_score")
                 existing["neighbor_confidence"] = neighbor.get("neighbor_confidence")
                 existing["neighbor_evidence"] = neighbor.get("neighbor_evidence") or []
+                existing["neighbor_negative_score"] = neighbor.get("neighbor_negative_score")
+                existing["neighbor_negative_evidence"] = neighbor.get("neighbor_negative_evidence") or []
                 existing["recall_sources"] = list(dict.fromkeys([*(existing.get("recall_sources") or []), "core-neighbor"]))
                 for key in ("actors", "categories", "maker", "series", "director", "cover_url", "image_candidates", "release_date", "field_sources", "completeness"):
                     if not existing.get(key) and neighbor.get(key):
@@ -2768,6 +2926,9 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     ]
     if live_warning:
         warnings.append(live_warning)
+    recalled_candidate_count = len(candidates)
+    if source_mode == "full":
+        candidates = _shortlist_candidates(candidates, profile, limit=max(180, requested_limit * 3))
     scored = []
     filtered_diagnostics: list[dict[str, Any]] = []
     for candidate_index, item in enumerate(candidates):
@@ -2785,11 +2946,20 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     if resource_warnings:
         warnings.extend(resource_warnings)
     scored.sort(key=lambda x: (x["score"], (x.get("resource_summary") or {}).get("total") or 0, x.get("magnets_count") or 0, x.get("release_date") or ""), reverse=True)
-    scored = _diversify_recommendations(scored)
+    # Full mode can contain thousands of candidates. Diversifying all of them
+    # is O(n²), while only a bounded head can reach this response or its
+    # exploration pool. Preserve the scored tail without blocking the loop.
+    diversify_window = min(len(scored), max(160, requested_limit * 4))
+    scored = _diversify_recommendations(scored[:diversify_window]) + scored[diversify_window:]
     controls_config = dict(config)
     if config.get("adaptive_exploration_enabled", True):
         mature_route_samples = int(route_evaluation.get("eligible") or 0)
         adaptive_ratio = 0.08 if media_count >= 100 and mature_route_samples >= 30 else 0.1 if media_count >= 30 else 0.14
+        exploration_metric = (exploration_evaluation.get("cohorts") or {}).get("exploration") or {}
+        ranking_metric = (exploration_evaluation.get("cohorts") or {}).get("ranking") or {}
+        if int(exploration_metric.get("exposed") or 0) >= 20:
+            delta = float(exploration_metric.get("posterior_rate") or 0) - float(ranking_metric.get("posterior_rate") or 0)
+            adaptive_ratio = max(0.06, min(0.14, adaptive_ratio + max(-0.02, min(0.02, delta * 0.25))))
         controls_config["exploration_ratio"] = max(float(config.get("exploration_ratio") or 0), adaptive_ratio)
     if cold_start_strength > 0:
         controls_config["exploration_ratio"] = max(float(config.get("exploration_ratio") or 0), 0.1 + cold_start_strength * 0.1)
@@ -2825,6 +2995,8 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         },
         "stats": {
             "candidates": len(candidates),
+            "recalled_candidates": recalled_candidate_count,
+            "shortlisted_candidates": len(candidates),
             "candidate_pool_total": _candidate_pool_stats(pool)["total"],
             "candidate_pool_today": _candidate_pool_stats(pool)["today_increment"],
             "today_increment": sum(1 for item in candidates if item.get("is_today_increment")),
@@ -2833,6 +3005,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "cold_start": {"active": cold_start_strength > 0, "strength": round(cold_start_strength, 3), "threshold": cold_start_threshold},
             "model_evaluation": _model_evaluation(store),
             "route_evaluation": route_evaluation,
+            "exploration_evaluation": exploration_evaluation,
             "exploration": {
                 "adaptive": bool(config.get("adaptive_exploration_enabled", True)),
                 "ratio": round(float(controls_config.get("exploration_ratio") or 0), 3),
@@ -2840,6 +3013,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             },
             "neighbor_recall": {
                 "seeds": int(similarity_meta.get("seed_count") or 0),
+                "negative_seeds": int(similarity_meta.get("negative_seed_count") or 0),
                 "candidates": len(similarity_meta.get("items") or []),
                 "linked_works": int(similarity_meta.get("linked_work_count") or 0),
                 "scored": sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0),
@@ -2934,6 +3108,9 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
             "reason": str(payload.get("reason") or ""),
             "actors": [str(x).strip() for x in (payload.get("actors") or []) if str(x or "").strip()][:8],
             "categories": [str(x).strip() for x in (payload.get("categories") or []) if str(x or "").strip()][:12],
+            "recall_sources": [str(x).strip() for x in (payload.get("recall_sources") or []) if str(x or "").strip()][:8],
+            "is_exploration": bool(payload.get("is_exploration")),
+            "exploration_kind": str(payload.get("exploration_kind") or "")[:64],
         }
         data[key] = [x for x in data.get(key, []) if _norm_code(x.get("code") if isinstance(x, dict) else x) != code]
         data[key].insert(0, row)
@@ -2968,7 +3145,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         return {"ok": True, "recorded": recorded}
     if action == "model_evaluation":
         data = _ensure_store()
-        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data), "route_evaluation": _route_evaluation(data)}
+        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data), "route_evaluation": _route_evaluation(data), "exploration_evaluation": _exploration_evaluation(data)}
     if action == "model_policy":
         policy = str(payload.get("policy") or "auto").strip().lower()
         if policy not in {"auto", "personal", "stable"}:

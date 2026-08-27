@@ -326,6 +326,9 @@ export async function mount(root, sdk) {
           kind,
           actors: item.actors || [],
           categories: item.categories || [],
+          recall_sources: item.recall_sources || [],
+          is_exploration: !!item.is_exploration,
+          exploration_kind: item.exploration_kind || '',
         },
       })
       sdk.toast?.success(kind === 'ignore' ? '已忽略' : kind === 'like' ? '已标记喜欢' : '已标记不感兴趣')
@@ -370,6 +373,8 @@ export async function mount(root, sdk) {
           score: item.score || 0,
           model_version: item.model_version || state.data?.model?.version || 'unknown',
           recall_sources: item.recall_sources || [],
+          is_exploration: !!item.is_exploration,
+          exploration_kind: item.exploration_kind || '',
         })),
       },
     }).catch(() => {})
