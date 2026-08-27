@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from app.core.runtime_paths import plugin_data_path
+from app.knowledge.intelligence import record_preference_event
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
 PLUGIN_ID = "subscription-core"
@@ -136,6 +137,20 @@ def _event(data: dict[str, Any], subscription_id: str, level: str, message: str,
         "created_at": _now(),
     })
     del events[EVENT_LIMIT:]
+
+
+async def _record_core_outcome(sub: dict[str, Any], event_type: str, payload: dict[str, Any] | None = None) -> None:
+    try:
+        evidence = payload or {}
+        await record_preference_event(
+            str(sub.get("code") or ""),
+            event_type,
+            source=PLUGIN_ID,
+            data={"subscription_id": str(sub.get("id") or ""), **evidence},
+        )
+    except Exception:
+        # Intelligence evidence must not break the subscription workflow.
+        pass
 
 
 
@@ -1157,6 +1172,7 @@ async def _run_due_checks(config: dict[str, Any], *, sub_id: str = "", force: bo
                 _event(data, sub.get("id", ""), level, result.get("submit_error") or "推送下载失败", {"candidate_count": len(result.get("candidates") or []), "retry_after_at": sub.get("retry_after_at"), "error_kind": sub.get("last_submit_error_kind")})
             elif result.get("submit_result") and not result.get("submit_result", {}).get("deferred"):
                 _event(data, sub.get("id", ""), "success", "检测到匹配资源并已提交下载器", {"candidate_count": len(result.get("candidates") or []), "downloader_id": result.get("submit_result", {}).get("downloader_id")})
+                await _record_core_outcome(sub, "download_submitted", {"evidence_id": f"{sub.get('id')}:{sub.get('last_submit_resource_key') or sub.get('last_submit_at')}", "downloader_id": result.get("submit_result", {}).get("downloader_id") or ""})
             elif result.get("submit_result") and result.get("submit_result", {}).get("deferred"):
                 reason = result.get("submit_result", {}).get("reason")
                 if reason == "already_auto_submitted_today":
@@ -1412,18 +1428,23 @@ async def _reconcile_submitted(data: dict[str, Any], *, config: dict[str, Any] |
                 cleanup["completed_at"] = _now()
                 cleanup["reason"] = "新版本已入库，旧版本及其硬链接源链已自动清理。"
                 _event(data, sub.get("id", ""), "success", "洗版完成：新版本已入库并自动删除旧版本", {"old_path": old_path, "new_path": new_path})
+                await _record_core_outcome(sub, "upgrade_completed", {"evidence_id": f"{sub.get('id')}:{new_path}:upgrade", "old_path": old_path, "new_path": new_path, "cleanup": "completed"})
             except Exception as exc:
                 cleanup["status"] = "failed"
                 cleanup["failed_at"] = _now()
                 cleanup["reason"] = f"新版本已入库，但旧版本自动清理失败: {exc}"
                 _event(data, sub.get("id", ""), "error", cleanup["reason"], {"old_path": old_path, "new_path": new_path})
+                await _record_core_outcome(sub, "upgrade_cleanup_failed", {"evidence_id": f"{sub.get('id')}:{new_path}:cleanup-failed", "old_path": old_path, "new_path": new_path, "error": str(exc)[:1000]})
         elif old_type == "upgrade" and changed_in_place:
             sub["cleanup_suggestion"] = {"old_path": old_path, "new_path": new_path, "status": "not_required", "reason": "新版本已在原路径完成替换，无独立旧文件需清理。", "completed_at": _now()}
             _event(data, sub.get("id", ""), "success", "洗版完成：新版本已在原路径替换", {"path": new_path})
+            await _record_core_outcome(sub, "upgrade_completed", {"evidence_id": f"{sub.get('id')}:{new_path}:upgrade", "path": new_path, "cleanup": "not_required"})
         elif old_type == "subscribe":
             _event(data, sub.get("id", ""), "success", "订阅作品已入库，已自动转为洗版监控", {"path": new_path, "consumed_resource_key": consumed_key})
+            await _record_core_outcome(sub, "library_imported", {"evidence_id": f"{sub.get('id')}:{new_path}:import", "path": new_path, "consumed_resource_key": consumed_key})
         else:
             _event(data, sub.get("id", ""), "success", "提交任务已在媒体库确认入库", {"path": new_path, "consumed_resource_key": consumed_key})
+            await _record_core_outcome(sub, "library_imported", {"evidence_id": f"{sub.get('id')}:{new_path}:import", "path": new_path, "consumed_resource_key": consumed_key})
     return {"ok": True, "checked": len(targets), "confirmed": confirmed, "pending": pending}
 
 
