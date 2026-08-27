@@ -3216,17 +3216,16 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         warnings.append(live_warning)
     recalled_candidate_count = len(candidates)
     if source_mode == "full":
-        candidates = _shortlist_candidates(candidates, profile, limit=max(180, requested_limit * 3))
-    scored = []
-    filtered_diagnostics: list[dict[str, Any]] = []
-    for candidate_index, item in enumerate(candidates):
-        if candidate_index and candidate_index % 64 == 0:
-            await asyncio.sleep(0)
-        rec = _candidate_score(item, profile, scoring_config, feedback, filtered_diagnostics)
-        if rec:
-            scored.append(rec)
-    scored = _dedupe_recommendations(scored)
-    scored.sort(key=lambda x: (x["score"], x.get("magnets_count") or 0, x.get("release_date") or ""), reverse=True)
+        candidates = await asyncio.to_thread(_shortlist_candidates, candidates, profile, limit=max(180, requested_limit * 3))
+
+    def score_candidates() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        diagnostics: list[dict[str, Any]] = []
+        rows = [rec for item in candidates if (rec := _candidate_score(item, profile, scoring_config, feedback, diagnostics))]
+        rows = _dedupe_recommendations(rows)
+        rows.sort(key=lambda x: (x["score"], x.get("magnets_count") or 0, x.get("release_date") or ""), reverse=True)
+        return rows, diagnostics
+
+    scored, filtered_diagnostics = await asyncio.to_thread(score_candidates)
     # A small first pass lets resource actionability influence ranking without
     # making the initial recommendation request excessively expensive.
     initial_resource_config = {**config, "resource_enrich_limit": 16, "resource_enrich_budget_seconds": 4}
@@ -3238,7 +3237,8 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     # is O(n²), while only a bounded head can reach this response or its
     # exploration pool. Preserve the scored tail without blocking the loop.
     diversify_window = min(len(scored), max(160, requested_limit * 4))
-    scored = _diversify_recommendations(scored[:diversify_window]) + scored[diversify_window:]
+    diversified_head = await asyncio.to_thread(_diversify_recommendations, scored[:diversify_window])
+    scored = diversified_head + scored[diversify_window:]
     controls_config = dict(config)
     if config.get("adaptive_exploration_enabled", True):
         mature_route_samples = int(route_evaluation.get("eligible") or 0)
