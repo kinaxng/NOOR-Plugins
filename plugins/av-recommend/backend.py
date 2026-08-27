@@ -45,7 +45,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 6
+RECOMMENDATION_ALGORITHM_VERSION = 7
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
 _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
@@ -1563,6 +1563,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     behavior_codes: Counter = feedback.get("behavior_codes") or Counter()
     behavior_actors: Counter = feedback.get("behavior_actors") or Counter()
     behavior_categories: Counter = feedback.get("behavior_categories") or Counter()
+    outcome_model: dict[str, Any] = feedback.get("outcome_model") or {}
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
         return None
@@ -1593,6 +1594,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     actionability_score = 0.0
     quality_score = 0.0
     penalty_score = 0.0
+    outcome_calibration_score = 0.0
 
     actor_counter: Counter = profile.get("actor_identities") or profile.get("actors") or Counter()
     genre_counter: Counter = profile.get("genres") or Counter()
@@ -1714,6 +1716,29 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         category_preference_score += boost
         feedback_score += boost
         reasons.append("近期互动题材")
+
+    outcome_signals: list[tuple[float, float]] = []
+    actor_outcomes = outcome_model.get("actors") if isinstance(outcome_model.get("actors"), dict) else {}
+    category_outcomes = outcome_model.get("categories") if isinstance(outcome_model.get("categories"), dict) else {}
+    for identity in actor_identities:
+        row = actor_outcomes.get(identity) if isinstance(actor_outcomes.get(identity), dict) else None
+        if row:
+            outcome_signals.append((float(row.get("rate") or 0.5), float(row.get("reliability") or 0)))
+    for category in categories:
+        row = category_outcomes.get(category) if isinstance(category_outcomes.get(category), dict) else None
+        if row:
+            outcome_signals.append((float(row.get("rate") or 0.5), float(row.get("reliability") or 0) * _generic_category_factor(category)))
+    signal_weight = sum(weight for _rate, weight in outcome_signals)
+    if signal_weight > 0:
+        calibrated_rate = sum(rate * weight for rate, weight in outcome_signals) / signal_weight
+        reliability = min(1.0, signal_weight / 3)
+        outcome_calibration_score = max(-6.0, min(6.0, (calibrated_rate - 0.5) * 18 * reliability))
+        score += outcome_calibration_score
+        personalized_score += outcome_calibration_score
+        if outcome_calibration_score >= 0.8:
+            reasons.append("验证结果匹配")
+        elif outcome_calibration_score <= -0.8:
+            reasons.append("历史转化较弱")
 
     combo_hits = []
     for actor, actor_identity in zip(actors, actor_identities):
@@ -1905,6 +1930,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "penalty_score": round(penalty_score, 1),
         "match_level": match_bucket,
         "confidence": max(0, min(100, round(personalized_score * 1.6 + actionability_score * 0.45 - penalty_score * 0.7))),
+        "outcome_calibration": round(outcome_calibration_score, 1),
         "score_breakdown": {
             "preference": round(personalized_score, 1),
             "actor_preference": round(actor_preference_score, 1),
@@ -1912,6 +1938,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "relationship_preference": round(relationship_preference_score, 1),
             "semantic_preference": round(semantic_preference_score, 1),
             "feedback": round(feedback_score, 1),
+            "outcomes": round(outcome_calibration_score, 1),
             "resources": round(actionability_score, 1),
             "quality": round(quality_score, 1),
             "penalty": round(penalty_score, 1),
@@ -2230,6 +2257,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "behavior_codes": Counter(behavior.get("codes") or {}),
         "behavior_actors": Counter(behavior.get("actor_identities") or behavior.get("actors") or {}),
         "behavior_categories": Counter(behavior.get("categories") or {}),
+        "outcome_model": behavior.get("outcomes") or {},
     }
     requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
     cache_ttl = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
