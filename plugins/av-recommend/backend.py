@@ -63,7 +63,7 @@ DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
 _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
 _pool_lock = asyncio.Lock()
-_recommendation_generation_lock = asyncio.Lock()
+_recommendation_generation_locks = {"latest": asyncio.Lock(), "full": asyncio.Lock()}
 _scheduler_task: asyncio.Task[None] | None = None
 _scheduler_stop: asyncio.Event | None = None
 _prewarm_state: dict[str, Any] = {"status": "idle", "last_started_at": None, "last_finished_at": None, "last_error": "", "modes": []}
@@ -3194,8 +3194,10 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
 
 
 async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    """Single-flight recommendation generation shared by pages and prewarming."""
-    async with _recommendation_generation_lock:
+    """Single-flight each mode without letting full maintenance block latest."""
+    source_mode = str(payload.get("source_mode") or "latest").strip().lower()
+    lock = _recommendation_generation_locks["full" if source_mode == "full" else "latest"]
+    async with lock:
         return await _recommendations_unlocked(config, payload)
 
 
