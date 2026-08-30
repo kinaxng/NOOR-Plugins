@@ -35,6 +35,10 @@ OAuth token 只在后端使用，通过 NOOR 插件 secret store 加密保存，
 - `stream_url_cache_seconds`：115 临时播放地址的内存短缓存，最多 300 秒，不持久化。
 - `mediainfo_enabled` / `mediainfo_concurrency`：只对新媒体 probe；默认并发 1。
 - `mediainfo_timeout` / `mediainfo_retry_limit`：超时和指数退避重试上限。
+- `auto_organize_enabled`：STRM 创建后自动提交本地整理，默认开启。
+- `organizer_plugin_id` / `organizer_action`：默认复用 `mdc-ng-manual/create`，不复制其任务实现。
+- `pipeline_poll_interval`：整理任务状态同步间隔，默认 60 秒。
+- `media_library_notify_enabled`：整理完成后向 NOOR 媒体库 adapter 报告目标目录。
 
 ## STRM 与播放
 
@@ -60,7 +64,9 @@ worker 使用 `ffprobe -v error -print_format json -show_format -show_streams <N
 - `115.strm.created`
 - `115.mediainfo.ready`
 
-事件持久、幂等，不包含 OAuth token、stream token 或 115 临时 URL。当前 MDC-NG 插件只有人工任务 provider，尚无可靠的自动事件消费者，所以 115 不会伪装成 FUSE 视频让 MDC-NG 扫描。消费者应把 `115.strm.created.payload.local_path` 交给本地整理流程，待 NFO/海报/最终 STRM 目录就绪后，再调用 NOOR 媒体库 adapter 的定向刷新接口。
+事件持久、幂等，不包含 OAuth token、stream token 或 115 临时 URL。后台协调器复用 NOOR 已有的插件 action 和 external-task job：把 `115.strm.created.payload.local_path` 提交给配置的本地整理插件，持久保存 NOOR job ID，并同步到终态。整理插件未启用或暂时不可用时，源事件保持 pending，后续自动重试，不会丢失。整理完成后，协调器使用任务返回的目标目录调用 NOOR 媒体库 adapter；失败、取消和成功也会形成可审计事件。
+
+默认消费者是 `mdc-ng-manual`。MDC-NG 只接收本地 `.strm`，不接触 115 文件或 FUSE 路径。若使用其他整理插件，它需要实现兼容的 action：接收 `source_paths`，返回 `ok` 和持久的 `noor_job_id`。
 
 NOOR 的 Emby adapter 使用受支持的 `POST /emby/Library/Media/Updated`，仅报告新建的本地路径，不触发全库扫描。官方 REST API 没有稳定的外部 MediaStreams 写入契约，因此当前不做数据库 hack；MediaInfo cache 已为未来独立 Emby Server Plugin 预留结构化输入。
 

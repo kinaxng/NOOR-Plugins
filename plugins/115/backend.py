@@ -12,6 +12,7 @@ from .services.auth import code_challenge, poll_device_authorization, start_devi
 from .services.client import Client115, Error115, PLUGIN_ID, normalize_file
 from .services.offline import add_urls, list_remote_tasks
 from .services.mediainfo import enqueue as enqueue_mediainfo, process_next as process_next_mediainfo
+from .services.pipeline import process_pipeline_once
 from .services.storage import acknowledge_event, create_task, emit_event, find_duplicate, init_storage, list_events, list_media, list_tasks, media_dict, recover_interrupted_mediainfo, source_identity, task_dict, update_task, upsert_media, utcnow
 from .services.strm import create_strm, is_media_file, resolve_stream as resolve_stream_service
 
@@ -20,6 +21,8 @@ _poll_task: asyncio.Task[None] | None = None
 _poll_stop: asyncio.Event | None = None
 _mediainfo_task: asyncio.Task[None] | None = None
 _mediainfo_stop: asyncio.Event | None = None
+_pipeline_task: asyncio.Task[None] | None = None
+_pipeline_stop: asyncio.Event | None = None
 
 
 def _public_account(data: dict[str, Any]) -> dict[str, Any]:
@@ -215,18 +218,34 @@ async def _mediainfo_loop(config: dict[str, Any]) -> None:
             pass
 
 
+async def _pipeline_loop(config: dict[str, Any]) -> None:
+    global _pipeline_stop
+    _pipeline_stop = asyncio.Event()
+    while not _pipeline_stop.is_set():
+        try:
+            await process_pipeline_once(config)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(_pipeline_stop.wait(), timeout=max(30, int(config.get("pipeline_poll_interval") or 60)))
+        except asyncio.TimeoutError:
+            pass
+
+
 async def start_background(config: dict[str, Any]) -> None:
-    global _poll_task, _mediainfo_task
+    global _poll_task, _mediainfo_task, _pipeline_task
     init_storage()
     await asyncio.to_thread(recover_interrupted_mediainfo)
     if not _poll_task or _poll_task.done():
         _poll_task = asyncio.create_task(_poll_loop(dict(config)))
     if not _mediainfo_task or _mediainfo_task.done():
         _mediainfo_task = asyncio.create_task(_mediainfo_loop(dict(config)))
+    if not _pipeline_task or _pipeline_task.done():
+        _pipeline_task = asyncio.create_task(_pipeline_loop(dict(config)))
 
 
 async def stop_background() -> None:
-    global _poll_task, _poll_stop, _mediainfo_task, _mediainfo_stop
+    global _poll_task, _poll_stop, _mediainfo_task, _mediainfo_stop, _pipeline_task, _pipeline_stop
     if _poll_stop:
         _poll_stop.set()
     if _poll_task:
@@ -239,10 +258,18 @@ async def stop_background() -> None:
         _mediainfo_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await _mediainfo_task
+    if _pipeline_stop:
+        _pipeline_stop.set()
+    if _pipeline_task:
+        _pipeline_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _pipeline_task
     _poll_task = None
     _poll_stop = None
     _mediainfo_task = None
     _mediainfo_stop = None
+    _pipeline_task = None
+    _pipeline_stop = None
 
 
 async def handle_action(action: str, config: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
