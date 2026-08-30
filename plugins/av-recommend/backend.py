@@ -1948,7 +1948,7 @@ def _build_title_profile(media: list[KnowledgeEntity], media_weights: dict[str, 
     return {"title_traits": title_traits, "title_terms": _prune_title_term_counter(title_terms)}
 
 
-async def _library_profile() -> dict[str, Any]:
+async def _library_profile(*, weight_policy: str = "temporal") -> dict[str, Any]:
     empty_profile = {
         "media_count": 0,
         "codes": set(),
@@ -1979,7 +1979,10 @@ async def _library_profile() -> dict[str, Any]:
             return empty_profile
         media = list(media_rows.scalars().all())
         media_ids = [item.id for item in media]
-        media_weights = {item.id: _media_preference_weight(item) for item in media}
+        media_weights = {
+            item.id: (0.75 if weight_policy == "durable" else _media_preference_weight(item))
+            for item in media
+        }
         profile = {
             "media_count": len(media),
             "codes": set(),
@@ -3847,7 +3850,8 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             temporal_backtest = {"recommended_policy": "collecting", "error": str(exc), "evaluated": 0}
         graph_profile = profile
         if temporal_backtest.get("recommended_policy") != "temporal":
-            graph_profile = {**profile, "code_weights": {code: 0.75 for code in (profile.get("code_weights") or {})}}
+            profile = await _library_profile(weight_policy="durable")
+            graph_profile = profile
         graph_seed_weights, graph_seed_sources = _positive_neighbor_seed_weights(graph_profile, behavior, store)
         try:
             similarity_evaluation = await work_similarity_recall_evaluation(
