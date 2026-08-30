@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 41
-PERSONALIZED_MODEL_VERSION = "personal-v41"
+RECOMMENDATION_ALGORITHM_VERSION = 42
+PERSONALIZED_MODEL_VERSION = "personal-v42"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -2287,9 +2287,23 @@ async def _javdb_candidates(config: dict[str, Any]) -> tuple[list[dict[str, Any]
             ("rankings", "月榜", {"page": 1, "limit": max(18, candidate_limit // 3), "period": "monthly", "type": 0}),
         ]
         by_code: dict[str, dict[str, Any]] = {}
-        for action, label, payload in requests:
+
+        async def fetch_source(action: str, label: str, source_payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None, str]:
             try:
-                data = await runtime.handle_action("javdb", action, payload)
+                data = await asyncio.wait_for(runtime.handle_action("javdb", action, source_payload), timeout=15)
+                return label, data if isinstance(data, dict) else {}, ""
+            except asyncio.TimeoutError:
+                return label, None, f"JavDB {label} 超过 15 秒，已跳过本次源站刷新"
+            except Exception as exc:
+                return label, None, f"JavDB {label} 拉取失败：{exc}"
+
+        source_results = await asyncio.gather(*(fetch_source(action, label, source_payload) for action, label, source_payload in requests))
+        for label, data, warning in source_results:
+            if warning:
+                warnings.append(warning)
+            if data is None:
+                continue
+            try:
                 for item in data.get("items") or []:
                     code = _norm_code(item.get("code") or item.get("number") or item.get("display_title") or item.get("title"))
                     if not code:
@@ -2312,7 +2326,7 @@ async def _javdb_candidates(config: dict[str, Any]) -> tuple[list[dict[str, Any]
                         if not current.get("fanart_url"):
                             current["fanart_url"] = current.get("cover_url") or current.get("thumb_url") or item.get("cover_url") or item.get("thumb_url") or ""
             except Exception as exc:
-                warnings.append(f"JavDB {action} 拉取失败：{exc}")
+                warnings.append(f"JavDB {label} 结果解析失败：{exc}")
         items = list(by_code.values())
         semaphore = asyncio.Semaphore(6)
 
@@ -2322,7 +2336,7 @@ async def _javdb_candidates(config: dict[str, Any]) -> tuple[list[dict[str, Any]
                 return item
             async with semaphore:
                 try:
-                    detail = await runtime.handle_action("javdb", "video", {"code": code})
+                    detail = await asyncio.wait_for(runtime.handle_action("javdb", "video", {"code": code}), timeout=12)
                     data = detail.get("data") if isinstance(detail, dict) else {}
                     if isinstance(data, dict):
                         item["detail"] = data
@@ -2345,7 +2359,19 @@ async def _javdb_candidates(config: dict[str, Any]) -> tuple[list[dict[str, Any]
                     pass
             return item
 
-        enriched = await asyncio.gather(*(enrich(item) for item in items[:detail_limit]))
+        detail_tasks = [asyncio.create_task(enrich(item)) for item in items[:detail_limit]]
+        detail_done, detail_pending = await asyncio.wait(detail_tasks, timeout=18) if detail_tasks else (set(), set())
+        if detail_pending:
+            pending_items = [items[index] for index, task in enumerate(detail_tasks) if task in detail_pending]
+            for task in detail_pending:
+                task.cancel()
+            await asyncio.gather(*detail_pending, return_exceptions=True)
+            queued = _queue_profile_enrichment(config, pending_items, max_accept=12, reason="javdb_detail_budget")
+            warnings.append(
+                f"JavDB 详情补全达到 18 秒预算，剩余 {len(detail_pending)} 项中 {queued} 项已转为后台画像补全"
+                if queued else f"JavDB 详情补全达到 18 秒预算，剩余 {len(detail_pending)} 项保留列表画像"
+            )
+        enriched = [task.result() for task in detail_done if not task.cancelled() and task.exception() is None]
         by_code.update({_norm_code(item.get("code") or item.get("number")): item for item in enriched if _norm_code(item.get("code") or item.get("number"))})
         return list(by_code.values()), warnings
     except Exception as exc:
@@ -3554,8 +3580,30 @@ async def _merge_cached_resource_intelligence(result: dict[str, Any]) -> dict[st
 
 def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """MMR-style reranking across stable actor, studio, series and topic identities."""
-    remaining = list(items)
+    def signature(item: dict[str, Any]) -> dict[str, Any]:
+        actors = tuple(dict.fromkeys(actor_identity_key(value) for value in item.get("actors") or [] if actor_identity_key(value)))
+        categories = tuple(dict.fromkeys(
+            canonical_preference_category(value)
+            for value in item.get("categories") or []
+            if _generic_category_factor(value) >= 0.5 and canonical_preference_category(value)
+        ))
+        breakdown = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+        return {
+            "actors": actors,
+            "actor_set": frozenset(actors),
+            "categories": categories,
+            "category_set": frozenset(categories),
+            "maker": _norm_key(_name_one(item.get("maker"))),
+            "series": _norm_key(_name_one(item.get("series"))),
+            "value": float(item.get("score") or 0) + min(5.0, max(0.0, float(item.get("personalized_score") or 0)) * 0.06),
+            "context_alignment": min(1.0, (float(breakdown.get("session_intent") or 0) + float(breakdown.get("search_intent") or 0)) / 5.0),
+        }
+
+    # Normalization (especially MDC-NG alias lookup) is independent of rank;
+    # doing it once turns the inner MMR loop into cheap set/counter arithmetic.
+    remaining = [(item, signature(item)) for item in items]
     selected: list[dict[str, Any]] = []
+    selected_signatures: list[dict[str, Any]] = []
     actor_seen: Counter = Counter()
     category_seen: Counter = Counter()
     maker_seen: Counter = Counter()
@@ -3564,14 +3612,12 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
         best_index = 0
         best_value = -9999.0
         best_adjustment: dict[str, Any] = {}
-        for index, item in enumerate(remaining):
-            # The public score is intentionally capped, so retain a small part
-            # of the uncapped affinity to distinguish several 100-point rows.
-            value = float(item.get("score") or 0) + min(5.0, max(0.0, float(item.get("personalized_score") or 0)) * 0.06)
-            actors = list(dict.fromkeys(actor_identity_key(x) for x in item.get("actors") or [] if actor_identity_key(x)))
-            categories = [str(x) for x in item.get("categories") or [] if _generic_category_factor(x) >= 0.5]
-            maker = _norm_key(_name_one(item.get("maker")))
-            series = _norm_key(_name_one(item.get("series")))
+        for index, (_item, sig) in enumerate(remaining):
+            value = float(sig["value"])
+            actors = sig["actors"]
+            categories = sig["categories"]
+            maker = str(sig["maker"])
+            series = str(sig["series"])
             actor_penalty = sum(4.5 * math.sqrt(actor_seen.get(actor, 0)) for actor in actors[:4] if actor_seen.get(actor, 0))
             category_penalty = sum(min(3, category_seen.get(category, 0)) * 1.15 for category in categories[:3])
             maker_penalty = 2.75 * (maker_seen.get(maker, 0) ** 0.8) if maker else 0.0
@@ -3580,38 +3626,21 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
             # sequence.  Use the last three cards as a separate, bounded
             # window so aliases that resolve to one MDC-NG identity cannot sit
             # next to each other merely because their labels differ.
-            recent = selected[-3:]
+            recent = selected_signatures[-3:]
             immediate = recent[-1] if recent else {}
-            immediate_actors = {actor_identity_key(x) for x in immediate.get("actors") or [] if actor_identity_key(x)}
-            recent_actors = {
-                actor_identity_key(x)
-                for row in recent
-                for x in row.get("actors") or []
-                if actor_identity_key(x)
-            }
-            immediate_categories = {
-                canonical_preference_category(x)
-                for x in immediate.get("categories") or []
-                if _generic_category_factor(x) >= 0.5
-            }
-            canonical_categories = {
-                canonical_preference_category(x)
-                for x in categories
-                if canonical_preference_category(x)
-            }
-            adjacency_actor_penalty = 7.0 if immediate_actors & set(actors) else 2.25 if recent_actors & set(actors) else 0.0
-            adjacency_series_penalty = 7.5 if series and series == _norm_key(_name_one(immediate.get("series"))) else 0.0
-            adjacency_maker_penalty = 2.5 if maker and maker == _norm_key(_name_one(immediate.get("maker"))) else 0.0
+            immediate_actors = immediate.get("actor_set") or frozenset()
+            recent_actors = frozenset(actor for row in recent for actor in row["actors"])
+            immediate_categories = immediate.get("category_set") or frozenset()
+            canonical_categories = sig["category_set"]
+            adjacency_actor_penalty = 7.0 if immediate_actors & sig["actor_set"] else 2.25 if recent_actors & sig["actor_set"] else 0.0
+            adjacency_series_penalty = 7.5 if series and series == immediate.get("series") else 0.0
+            adjacency_maker_penalty = 2.5 if maker and maker == immediate.get("maker") else 0.0
             category_overlap = len(immediate_categories & canonical_categories) / max(1, len(immediate_categories | canonical_categories))
             adjacency_category_penalty = min(2.5, category_overlap * 3.0)
             adjacency_penalty = adjacency_actor_penalty + adjacency_series_penalty + adjacency_maker_penalty + adjacency_category_penalty
             # A strongly current-intent-aligned pair may represent deliberate
             # continuity, so keep the constraint soft instead of scattering it.
-            context_alignment = min(1.0, (
-                float((item.get("score_breakdown") or {}).get("session_intent") or 0)
-                + float((item.get("score_breakdown") or {}).get("search_intent") or 0)
-            ) / 5.0)
-            adjacency_penalty *= 1.0 - 0.55 * context_alignment
+            adjacency_penalty *= 1.0 - 0.55 * float(sig["context_alignment"])
             penalty = actor_penalty + category_penalty + maker_penalty + series_penalty + adjacency_penalty
             adjusted = value - penalty
             if adjusted > best_value:
@@ -3630,17 +3659,15 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
                     "adjacent_category": round(adjacency_category_penalty, 2),
                     "utility": round(adjusted, 2),
                 }
-        picked = remaining.pop(best_index)
+        picked, picked_signature = remaining.pop(best_index)
         picked["diversity_rank"] = len(selected) + 1
         picked["diversity_adjustment"] = best_adjustment
         selected.append(picked)
-        for actor in (picked.get("actors") or [])[:3]:
-            actor_seen[actor_identity_key(actor)] += 1
-        for category in (picked.get("categories") or [])[:4]:
-            if _generic_category_factor(category) >= 0.5:
-                category_seen[str(category)] += 1
-        maker = _norm_key(_name_one(picked.get("maker")))
-        series = _norm_key(_name_one(picked.get("series")))
+        selected_signatures.append(picked_signature)
+        actor_seen.update(picked_signature["actors"][:3])
+        category_seen.update(picked_signature["categories"][:4])
+        maker = str(picked_signature["maker"])
+        series = str(picked_signature["series"])
         if maker:
             maker_seen[maker] += 1
         if series:
@@ -3873,6 +3900,16 @@ def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str
 
 
 async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    generation_started = time.monotonic()
+    timing_cursor = generation_started
+    generation_timing: dict[str, float] = {}
+
+    def mark_timing(stage: str) -> None:
+        nonlocal timing_cursor
+        now = time.monotonic()
+        generation_timing[stage] = round(now - timing_cursor, 3)
+        timing_cursor = now
+
     source_mode = str(payload.get("source_mode") or "latest").strip().lower()
     if source_mode not in {"latest", "full"}:
         source_mode = "latest"
@@ -3924,6 +3961,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "exposure_penalties": _exposure_penalties(store),
         "exposure_fatigue": exposure_fatigue,
     }
+    mark_timing("context")
     requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
     cache_ttl = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
     # This key intentionally avoids library/profile work. Cache invalidation
@@ -3973,6 +4011,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     cold_start_strength = max(0.0, min(1.0, 1 - media_count / cold_start_threshold)) if config.get("adaptive_cold_start_enabled", True) else 0.0
     scoring_config = {**config, "_cold_start_strength": cold_start_strength, "_ranking_policy": model_selection["policy"]}
     live_codes, live_warning = await _live_library_codes(config, force=bool(payload.get("refresh")))
+    mark_timing("library_profile")
     cache_key = json.dumps({
         "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
         "ranking_model": model_selection["version"],
@@ -4035,6 +4074,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 if not item.get("source_tags"):
                     item["source_tags"] = list(persisted.get("source_tags") or [])
                 item["is_today_increment"] = bool(persisted.get("is_today_increment"))
+    mark_timing("candidate_sources")
 
     base_recall_source = "candidate-pool" if source_mode == "full" else "javdb-feed"
     for item in candidates:
@@ -4116,6 +4156,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         similarity_meta["profile_enrichment_queued"] = _queue_profile_enrichment(config, [neighbor for neighbor in (similarity_meta.get("items") or []) if _candidate_profile_gaps(neighbor)])
     except Exception as exc:
         warnings.append(f"Core 邻域召回暂不可用：{exc}")
+    mark_timing("core_graph")
 
     excluded_codes = set(profile.get("codes") or set())
     excluded_codes.update(live_codes)
@@ -4139,12 +4180,14 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         return rows, diagnostics
 
     scored, filtered_diagnostics = await asyncio.to_thread(score_candidates)
+    mark_timing("candidate_scoring")
     # A small first pass lets resource actionability influence ranking without
     # making the initial recommendation request excessively expensive.
     initial_resource_config = {**config, "resource_enrich_limit": 16, "resource_enrich_budget_seconds": 4}
     resource_warnings = await _enrich_recommendation_resources(initial_resource_config, scored)
     if resource_warnings:
         warnings.extend(resource_warnings)
+    mark_timing("initial_resources")
     scored.sort(key=lambda x: (x["score"], (x.get("resource_summary") or {}).get("total") or 0, x.get("magnets_count") or 0, x.get("release_date") or ""), reverse=True)
     shadow_ranks = await asyncio.to_thread(_shadow_rank_map, scored)
     # Full mode can contain thousands of candidates. Diversifying all of them
@@ -4172,12 +4215,14 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         item["model_version"] = model_selection["version"]
         item["shadow_ranks"] = dict(shadow_ranks.get(_norm_code(item.get("code"))) or {})
         item["shadow_ranks"][model_selection["version"]] = rank
+    mark_timing("sequence_controls")
     # Diversification can promote candidates that were outside the first-pass
     # window. Confirm the cards that will actually be displayed as a second
     # pass, skipping rows already enriched above.
     display_resource_warnings = await _enrich_recommendation_resources(config, scored)
     if display_resource_warnings:
         warnings.extend(display_resource_warnings)
+    mark_timing("display_resources")
     enrichment_public_state = _profile_enrichment_public_state()
     result = {
         "ok": True,
@@ -4250,6 +4295,10 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "selected": sum(1 for item in scored if item.get("is_exploration")),
             },
             "diversity": _recommendation_diversity_metrics(scored),
+            "generation_timing": {
+                **generation_timing,
+                "total": round(time.monotonic() - generation_started, 3),
+            },
             "neighbor_recall": {
                 "seeds": int(similarity_meta.get("seed_count") or 0),
                 "negative_seeds": int(similarity_meta.get("negative_seed_count") or 0),
@@ -4311,13 +4360,29 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     """Single-flight each mode without letting full maintenance block latest."""
     source_mode = str(payload.get("source_mode") or "latest").strip().lower()
     lock = _recommendation_generation_locks["full" if source_mode == "full" else "latest"]
+    requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
+    ttl_seconds = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
     if not payload.get("refresh"):
-        requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
-        ttl_seconds = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
         snapshot = _latest_mode_snapshot(source_mode, requested_limit, ttl_seconds=ttl_seconds)
         if snapshot is not None:
             if snapshot.get("cache_status", {}).get("status") == "stale":
                 _schedule_recommendation_refresh(config, payload, f"mode-snapshot:{source_mode}:{requested_limit}")
+            return snapshot
+    elif lock.locked():
+        # A startup prewarm or another explicit refresh is already producing
+        # this mode.  Wait for that single flight, then reuse its current-model
+        # result instead of immediately running the same expensive pipeline a
+        # second time behind the lock.
+        async with lock:
+            pass
+        snapshot = _latest_mode_snapshot(source_mode, requested_limit, ttl_seconds=ttl_seconds)
+        model_version = str(((snapshot or {}).get("model") or {}).get("version") or "")
+        if (
+            snapshot is not None
+            and int(snapshot.get("algorithm_version") or 0) == RECOMMENDATION_ALGORITHM_VERSION
+            and model_version in {PERSONALIZED_MODEL_VERSION, STABLE_MODEL_VERSION}
+        ):
+            snapshot["cache_status"] = {**dict(snapshot.get("cache_status") or {}), "status": "coalesced", "refreshing": False}
             return snapshot
     async with lock:
         return await _recommendations_unlocked(config, payload)

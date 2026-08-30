@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from collections import Counter
 from pathlib import Path
@@ -111,8 +112,8 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 41
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v41"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 42
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v42"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -231,6 +232,68 @@ def test_v41_transition_model_collapses_funnel_stages_and_waits_for_support() ->
     assert model["event_count"] == 7
     assert model["evidence"][f"actor:{actor_b}"]["support"] == 2
     assert model["predictions"][f"actor:{actor_b}"] > model["predictions"].get("category:巨乳", 0)
+
+
+def test_v42_javdb_candidate_sources_run_in_parallel(monkeypatch) -> None:
+    backend = _backend()
+    from app.plugins.runtime import runtime
+
+    active = 0
+    maximum_active = 0
+    source_calls: list[str] = []
+
+    async def fake_handle_action(plugin_id: str, action: str, payload: dict) -> dict:
+        nonlocal active, maximum_active
+        assert plugin_id == "javdb"
+        if action == "video":
+            return {"data": {}}
+        source_calls.append(f"{action}:{payload.get('period') or 'latest'}")
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return {"items": []}
+
+    monkeypatch.setattr(runtime, "is_enabled", lambda plugin_id: plugin_id == "javdb")
+    monkeypatch.setattr(runtime, "handle_action", fake_handle_action)
+    items, warnings = asyncio.run(backend._javdb_candidates({"candidate_limit": 12, "detail_limit": 0}))
+    assert items == [] and warnings == []
+    assert len(source_calls) == 4
+    assert maximum_active == 4
+
+
+def test_v42_explicit_refresh_coalesces_with_inflight_generation(monkeypatch) -> None:
+    backend = _backend()
+    calls = 0
+    snapshot: dict = {}
+    backend._recommendation_generation_locks = {"latest": asyncio.Lock(), "full": asyncio.Lock()}
+
+    async def fake_unlocked(_config: dict, _payload: dict) -> dict:
+        nonlocal calls, snapshot
+        calls += 1
+        await asyncio.sleep(0.03)
+        snapshot = {
+            "ok": True,
+            "algorithm_version": backend.RECOMMENDATION_ALGORITHM_VERSION,
+            "model": {"version": backend.PERSONALIZED_MODEL_VERSION},
+            "items": [{"code": "AAA-001"}],
+            "requested_limit": 1,
+        }
+        return dict(snapshot)
+
+    monkeypatch.setattr(backend, "_recommendations_unlocked", fake_unlocked)
+    monkeypatch.setattr(backend, "_latest_mode_snapshot", lambda *_args, **_kwargs: dict(snapshot) if snapshot else None)
+
+    async def run_pair() -> tuple[dict, dict]:
+        first = asyncio.create_task(backend._recommendations({}, {"limit": 1, "refresh": True}))
+        await asyncio.sleep(0.005)
+        second = asyncio.create_task(backend._recommendations({}, {"limit": 1, "refresh": True}))
+        return await first, await second
+
+    first, second = asyncio.run(run_pair())
+    assert calls == 1
+    assert first["algorithm_version"] == backend.RECOMMENDATION_ALGORITHM_VERSION
+    assert second["cache_status"]["status"] == "coalesced"
 
 
 def test_coverage_repair_queue_is_bounded_actionable_and_cooled_down(monkeypatch) -> None:
