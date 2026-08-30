@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 28
-PERSONALIZED_MODEL_VERSION = "personal-v28"
+RECOMMENDATION_ALGORITHM_VERSION = 29
+PERSONALIZED_MODEL_VERSION = "personal-v29"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -868,6 +868,35 @@ def _session_intent_summary(store: dict[str, Any], *, now_ms: int | None = None)
         "categories": dict(categories),
         "topics": dict(topics),
         "revision": hashlib.sha256(revision_source.encode("utf-8")).hexdigest()[:16],
+    }
+
+
+def _contextual_intent_gate(session: dict[str, Any], search: dict[str, Any]) -> dict[str, Any]:
+    dimensions = [
+        session.get("actors") or {}, session.get("categories") or {}, session.get("topics") or {},
+        search.get("actors") or {}, search.get("categories") or {}, search.get("terms") or {}, search.get("combinations") or {},
+    ]
+    active_dimensions = [
+        [max(0.0, float(value or 0)) for value in dimension.values() if float(value or 0) > 0]
+        for dimension in dimensions if isinstance(dimension, dict) and dimension
+    ]
+    active_dimensions = [values for values in active_dimensions if values]
+    event_count = int(session.get("event_count") or 0) + int(search.get("event_count") or 0)
+    if not active_dimensions or event_count <= 0:
+        return {"active": False, "gate": 0.0, "event_count": 0, "reliability": 0.0, "concentration": 0.0, "agreement": 0.0}
+    concentration = sum(max(values) / max(sum(values), 1e-9) for values in active_dimensions) / len(active_dimensions)
+    reliability = 1 - math.exp(-event_count / 2.5)
+    actor_agreement = bool(set(session.get("actors") or {}) & set(search.get("actors") or {}))
+    category_agreement = bool(set(session.get("categories") or {}) & set(search.get("categories") or {}))
+    agreement = (int(actor_agreement) + int(category_agreement)) / 2
+    gate = min(0.24, 0.18 * reliability * (0.65 + 0.35 * concentration) * (1 + 0.2 * agreement))
+    return {
+        "active": gate >= 0.025,
+        "gate": round(gate, 4),
+        "event_count": event_count,
+        "reliability": round(reliability, 4),
+        "concentration": round(concentration, 4),
+        "agreement": round(agreement, 3),
     }
 
 
@@ -2315,6 +2344,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     disliked_topics: Counter = feedback.get("disliked_topics") or Counter()
     session_intent: dict[str, Any] = feedback.get("session_intent") or {}
     search_intent: dict[str, Any] = feedback.get("search_intent") or {}
+    context_gate: dict[str, Any] = feedback.get("context_gate") or {}
     exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
@@ -2352,6 +2382,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     interest_topic_score = 0.0
     session_intent_score = 0.0
     search_intent_score = 0.0
+    context_mixture_penalty = 0.0
+    context_alignment = 0.0
     matched_search_combinations: list[dict[str, Any]] = []
     topic_feedback_adjustment = 0.0
     matched_interest_topic: dict[str, Any] | None = None
@@ -2794,6 +2826,15 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         penalty_score += 10
         reasons.append("标签过泛降权")
 
+    if context_gate.get("active"):
+        context_alignment = min(1.0, (session_intent_score + search_intent_score) / 5.0)
+        portrait_score = max(0.0, actor_preference_score + category_preference_score + relationship_preference_score + semantic_preference_score + max(0.0, outcome_calibration_score))
+        context_mixture_penalty = min(8.0, portrait_score * float(context_gate.get("gate") or 0) * (1 - context_alignment))
+        if context_mixture_penalty >= 0.25:
+            score -= context_mixture_penalty
+            penalty_score += context_mixture_penalty
+            reasons.append("当前意图与长期画像暂时分流")
+
     local_features = (profile.get("local_features") or {}).get(code) or {}
     if in_library:
         current_has_sub = bool(local_features.get("has_subtitle"))
@@ -2837,6 +2878,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         {"type": "topic", "label": "组合兴趣主题", "score": round(interest_topic_score, 1), "evidence": matched_interest_topic or {}},
         {"type": "session", "label": "当前兴趣方向", "score": round(session_intent_score, 1)},
         {"type": "search", "label": "当前搜索方向", "score": round(search_intent_score, 1), "evidence": matched_search_combinations[:3]},
+        {"type": "context", "label": "长期/即时混合门控", "score": round(-context_mixture_penalty, 1), "evidence": {"alignment": round(context_alignment, 3), **context_gate}},
         {"type": "outcome", "label": "入库结果校准", "score": round(outcome_calibration_score, 1)},
         {"type": "resource", "label": "资源可用性", "score": round(actionability_score, 1)},
         {"type": "quality", "label": "作品质量", "score": round(quality_score, 1)},
@@ -2883,6 +2925,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "interest_topic": matched_interest_topic or {},
         "interest_topic_hypothesis": interest_topic_hypothesis,
         "search_intent_matches": matched_search_combinations[:3],
+        "context_mixture": {"alignment": round(context_alignment, 3), "penalty": round(context_mixture_penalty, 2), "gate": float(context_gate.get("gate") or 0)},
         "neighbor_score": round(neighbor_score, 3),
         "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
         "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
@@ -2903,6 +2946,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "interest_topic": round(interest_topic_score, 1),
             "session_intent": round(session_intent_score, 1),
             "search_intent": round(search_intent_score, 1),
+            "context_mixture": round(-context_mixture_penalty, 1),
             "outcomes": round(outcome_calibration_score, 1),
             "recall_route": round(route_calibration_score, 1),
             "resources": round(actionability_score, 1),
@@ -3379,6 +3423,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     topic_evaluation = _topic_evaluation(store)
     session_intent = _session_intent_summary(store)
     core_search_intent = search_intent_summary()
+    context_gate = _contextual_intent_gate(session_intent, core_search_intent)
     search_evaluation = core_search_intent.get("evaluation") or {}
     search_evaluation_summary = {
         "eligible_events": int(search_evaluation.get("eligible_events") or 0),
@@ -3407,6 +3452,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "topic_weights": {topic_id: float(metric.get("weight") or 1) for topic_id, metric in (topic_evaluation.get("topics") or {}).items()},
         "session_intent": session_intent,
         "search_intent": core_search_intent,
+        "context_gate": context_gate,
         "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
         "exposure_penalties": _exposure_penalties(store),
     }
@@ -3666,6 +3712,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "exploration_evaluation": exploration_evaluation,
             "topic_evaluation": topic_evaluation,
             "search_evaluation": search_evaluation_summary,
+            "context_mixture": context_gate,
             "session_intent": {
                 "event_count": session_intent["event_count"] + core_search_intent["event_count"],
                 "interaction_events": session_intent["event_count"],

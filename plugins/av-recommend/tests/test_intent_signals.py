@@ -51,10 +51,10 @@ def test_topic_feedback_is_counted_without_hard_exclusion() -> None:
     ]) == Counter({"topic:a": 2})
 
 
-def test_v27_search_intent_scores_canonical_actor_category_and_title_term() -> None:
+def test_search_intent_scores_canonical_actor_category_and_title_term() -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 28
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v28"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 29
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v29"
     identity = backend.actor_identity_key("吉沢明歩")
     profile = {
         "codes": set(), "actor_identities": Counter(), "actors": Counter(),
@@ -82,3 +82,30 @@ def test_v27_search_intent_scores_canonical_actor_category_and_title_term() -> N
     assert searched["score_breakdown"]["search_intent"] >= 1.7
     assert "当前组合搜索方向" in searched["reasons"]
     assert searched["search_intent_matches"] == [{"id": combination_id, "label": "吉沢明歩 × 人妻", "strength": 1.0}]
+
+
+def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> None:
+    backend = _backend()
+    weak = backend._contextual_intent_gate({"event_count": 1, "actors": {"actor:a": 0.35}}, {"event_count": 0})
+    strong = backend._contextual_intent_gate(
+        {"event_count": 3, "actors": {"actor:a": 1.0}, "categories": {"人妻": 0.8}},
+        {"event_count": 2, "actors": {"actor:a": 1.2}, "categories": {"人妻": 1.5}},
+    )
+    assert 0 < weak["gate"] < strong["gate"] <= 0.24
+    assert strong["agreement"] == 1.0
+
+    identity = backend.actor_identity_key("吉沢明歩")
+    profile = {
+        "codes": set(), "actor_identities": Counter({identity: 5}), "actors": Counter(),
+        "genres": Counter({"人妻": 4, "巨乳": 4}), "tags": Counter(), "studios": Counter(),
+        "series": Counter(), "directors": Counter(), "title_traits": Counter(),
+        "semantic_terms": Counter(), "actor_category": Counter(), "category_pairs": Counter(),
+        "media_count": 30,
+    }
+    common = {"actors": ["吉泽明步"], "magnets_count": 1, "release_date": "2026-01-01"}
+    feedback = {"context_gate": strong, "search_intent": {"categories": {"人妻": 1.5}}}
+    unaligned = backend._candidate_score({**common, "code": "AAA-001", "title": "巨乳作品", "categories": ["巨乳"]}, profile, {}, feedback)
+    aligned = backend._candidate_score({**common, "code": "AAA-002", "title": "人妻作品", "categories": ["人妻"]}, profile, {}, feedback)
+    assert unaligned is not None and aligned is not None
+    assert unaligned["context_mixture"]["penalty"] > aligned["context_mixture"]["penalty"]
+    assert aligned["score"] > unaligned["score"]
