@@ -53,8 +53,6 @@ def test_topic_feedback_is_counted_without_hard_exclusion() -> None:
 
 def test_search_intent_scores_canonical_actor_category_and_title_term() -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 29
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v29"
     identity = backend.actor_identity_key("吉沢明歩")
     profile = {
         "codes": set(), "actor_identities": Counter(), "actors": Counter(),
@@ -109,3 +107,32 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
     assert unaligned is not None and aligned is not None
     assert unaligned["context_mixture"]["penalty"] > aligned["context_mixture"]["penalty"]
     assert aligned["score"] > unaligned["score"]
+
+
+def test_v30_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
+    backend = _backend()
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 30
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v30"
+    hour = 3_600_000
+    day = 24 * hour
+    now = 1_800_000_000_000
+    store = {"exposures": {
+        "AAA-001": {"batch_count": 2, "first_seen_at": now - hour, "last_seen_at": now, "last_rank": 5, "impression_history": [{"at": now - hour, "rank": 5}, {"at": now, "rank": 5}]},
+        "AAA-002": {"batch_count": 5, "first_seen_at": now - 8 * day, "last_seen_at": now - 4 * day, "last_rank": 8, "impression_history": [{"at": now - 8 * day, "rank": 8}, {"at": now - 4 * day, "rank": 8}]},
+        "AAA-003": {"batch_count": 2, "first_seen_at": now - hour, "last_seen_at": now, "last_rank": 5, "conversion_value": 0.75, "impression_history": [{"at": now, "rank": 5}]},
+        "AAA-004": {"batch_count": 2, "first_seen_at": now - hour, "last_seen_at": now, "last_rank": 5, "conversion_value": 0.15, "impression_history": [{"at": now - hour, "rank": 5}, {"at": now, "rank": 5}]},
+    }}
+    fresh = backend._exposure_fatigue(store, now_ms=now)
+    recovered = backend._exposure_fatigue(store, now_ms=now + 40 * day)
+    assert fresh["AAA-001"]["short"] > 0 and fresh["AAA-001"]["daily"] > 0
+    assert fresh["AAA-002"]["long"] > 0
+    assert "AAA-003" not in fresh
+    assert fresh["AAA-004"]["total"] < fresh["AAA-001"]["total"]
+    assert recovered["AAA-002"]["long"] < fresh["AAA-002"]["long"] / 4
+
+    monkeypatch.setattr(backend, "_now_ms", lambda: now)
+    recorded = {"exposures": {}, "exposure_batches": []}
+    item = {"code": "AAA-010", "rank": 3, "model_version": "v30", "score": 10}
+    assert backend._record_exposure_batch(recorded, "batch:1", [item]) == 1
+    assert backend._record_exposure_batch(recorded, "batch:1", [item]) == 0
+    assert recorded["exposures"]["AAA-010"]["impression_history"] == [{"at": now, "rank": 3, "batch_id": "batch:1"}]

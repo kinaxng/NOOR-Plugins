@@ -247,6 +247,7 @@ export async function mount(root, sdk) {
     const activeTopics = Object.values(topicMetrics).filter(item => item?.adaptation_status === 'active').length
     const searchEvaluation = stats.search_evaluation || {}
     const contextMixture = stats.context_mixture || {}
+    const exposureFatigue = stats.exposure_fatigue || {}
     profile.innerHTML = ''
     const cards = [
       ['媒体库', p.media_count || 0, '已分析作品'],
@@ -261,6 +262,7 @@ export async function mount(root, sdk) {
       ['当前意图', stats.session_intent?.event_count || 0, '12 小时渐进衰减'],
       ['搜索学习', `${searchEvaluation.adaptive_signals || 0}/${searchEvaluation.signal_count || 0}`, `${searchEvaluation.eligible_events || 0} 个成熟样本`],
       ['意图门控', contextMixture.active ? `${Math.round((contextMixture.gate || 0) * 100)}%` : '待信号', contextMixture.active ? `可靠 ${Math.round((contextMixture.reliability || 0) * 100)}%` : '长期画像为主'],
+      ['曝光轮换', exposureFatigue.active || 0, `${exposureFatigue.short || 0} 短时 · ${exposureFatigue.long || 0} 长期`],
     ]
     for (const [name, value, desc] of cards) {
       const card = el('div', 'av-rec-stat')

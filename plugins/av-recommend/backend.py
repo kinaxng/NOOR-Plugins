@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 29
-PERSONALIZED_MODEL_VERSION = "personal-v29"
+RECOMMENDATION_ALGORITHM_VERSION = 30
+PERSONALIZED_MODEL_VERSION = "personal-v30"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -900,19 +900,52 @@ def _contextual_intent_gate(session: dict[str, Any], search: dict[str, Any]) -> 
     }
 
 
-def _exposure_penalties(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, float]:
+def _exposure_fatigue(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, dict[str, float]]:
     now_ms = int(now_ms or _now_ms())
-    mature_age_ms = 7 * 86400 * 1000
-    penalties: dict[str, float] = {}
+    hour_ms = 3600 * 1000
+    day_ms = 24 * hour_ms
+    fatigue: dict[str, dict[str, float]] = {}
     for raw_code, row in (store.get("exposures") or {}).items():
         if not isinstance(row, dict) or _conversion_value(row) >= QUALIFIED_CONVERSION_THRESHOLD:
             continue
         code = _norm_code(raw_code)
+        if not code:
+            continue
         batches = int(row.get("batch_count") or 0)
         first_seen = int(row.get("first_seen_at") or now_ms)
-        if code and batches >= 3 and now_ms - first_seen >= mature_age_ms:
-            penalties[code] = round(min(4.0, 0.75 + (batches - 3) * 0.45), 2)
-    return penalties
+        history = [item for item in (row.get("impression_history") or []) if isinstance(item, dict) and int(item.get("at") or 0) > 0]
+        if not history and row.get("last_seen_at"):
+            history = [{"at": int(row.get("last_seen_at") or now_ms), "rank": int(row.get("last_rank") or 0)}]
+        short = daily = 0.0
+        for impression in history:
+            age = max(0, now_ms - int(impression.get("at") or now_ms))
+            rank = int(impression.get("rank") or 0)
+            rank_factor = 1.0 if 0 < rank <= 10 else 0.75 if 0 < rank <= 24 else 0.45
+            if age <= 12 * hour_ms:
+                short += 0.65 * rank_factor * math.pow(0.5, age / (3 * hour_ms))
+            if age <= 3 * day_ms:
+                daily += 0.28 * rank_factor * math.pow(0.5, age / (36 * hour_ms))
+        short = min(1.8, short)
+        daily = min(1.8, daily)
+        long_term = min(3.5, 0.65 + (batches - 3) * 0.4) if batches >= 3 and now_ms - first_seen >= 7 * day_ms else 0.0
+        last_seen = int(row.get("last_seen_at") or first_seen)
+        if long_term and now_ms - last_seen > 7 * day_ms:
+            long_term *= math.pow(0.5, (now_ms - last_seen - 7 * day_ms) / (14 * day_ms))
+        engagement_multiplier = max(0.6, 1 - _conversion_value(row) * 1.5)
+        total = min(6.0, (short + daily + long_term) * engagement_multiplier)
+        if total >= 0.1:
+            fatigue[code] = {
+                "total": round(total, 2),
+                "short": round(short * engagement_multiplier, 2),
+                "daily": round(daily * engagement_multiplier, 2),
+                "long": round(long_term * engagement_multiplier, 2),
+                "engagement_multiplier": round(engagement_multiplier, 3),
+            }
+    return fatigue
+
+
+def _exposure_penalties(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, float]:
+    return {code: float(row["total"]) for code, row in _exposure_fatigue(store, now_ms=now_ms).items()}
 
 
 def _mark_exposure_converted(store: dict[str, Any], code: Any, event_type: str = "interaction") -> bool:
@@ -980,6 +1013,7 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
         row = exposures.get(code) if isinstance(exposures.get(code), dict) else {}
         if _conversion_value(row) >= VERIFIED_CONVERSION_THRESHOLD:
             continue
+        rank = max(0, int(item.get("rank") or 0))
         row.update({
             "code": code,
             "first_seen_at": int(row.get("first_seen_at") or now),
@@ -988,6 +1022,9 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
             "actors": [str(value).strip() for value in (item.get("actors") or []) if str(value or "").strip()][:8],
             "categories": [str(value).strip() for value in (item.get("categories") or []) if str(value or "").strip()][:12],
         })
+        impression_history = [entry for entry in (row.get("impression_history") or []) if isinstance(entry, dict)]
+        impression_history.append({"at": now, "rank": rank, "batch_id": batch_id})
+        row["impression_history"] = impression_history[-48:]
         routes = [str(value).strip()[:64] for value in (item.get("recall_sources") or []) if str(value or "").strip()]
         route_evidence = row.setdefault("routes", {})
         for route in dict.fromkeys(routes):
@@ -1033,7 +1070,6 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
             topic_ids.append(topic_id)
         row["last_topic_ids"] = topic_ids
         model_version = str(item.get("model_version") or "unknown")[:64]
-        rank = max(0, int(item.get("rank") or 0))
         score_value = float(item.get("score") or 0)
         models = row.setdefault("models", {})
         model = models.get(model_version) if isinstance(models.get(model_version), dict) else {}
@@ -2346,6 +2382,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     search_intent: dict[str, Any] = feedback.get("search_intent") or {}
     context_gate: dict[str, Any] = feedback.get("context_gate") or {}
     exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
+    exposure_fatigue: dict[str, dict[str, float]] = feedback.get("exposure_fatigue") or {}
     if not code:
         _record_filter(diagnostics, item, code, "missing_code", "候选缺少可识别番号")
         return None
@@ -2391,7 +2428,13 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     if passive_exposure_penalty > 0:
         score -= passive_exposure_penalty
         penalty_score += passive_exposure_penalty
-        reasons.append("多次看过但尚未行动")
+        fatigue_detail = exposure_fatigue.get(code) or {}
+        if float(fatigue_detail.get("long") or 0) >= 0.5:
+            reasons.append("长期看过但尚未行动")
+        elif float(fatigue_detail.get("daily") or 0) >= 0.5:
+            reasons.append("近期重复出现，适度轮换")
+        else:
+            reasons.append("刚刚展示过，暂时轮换")
 
     actor_counter: Counter = profile.get("actor_identities") or profile.get("actors") or Counter()
     genre_counter: Counter = profile.get("genres") or Counter()
@@ -2926,6 +2969,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "interest_topic_hypothesis": interest_topic_hypothesis,
         "search_intent_matches": matched_search_combinations[:3],
         "context_mixture": {"alignment": round(context_alignment, 3), "penalty": round(context_mixture_penalty, 2), "gate": float(context_gate.get("gate") or 0)},
+        "exposure_fatigue": exposure_fatigue.get(code) or {},
         "neighbor_score": round(neighbor_score, 3),
         "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
         "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
@@ -3432,6 +3476,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "adaptive_signals": int(search_evaluation.get("adaptive_signals") or 0),
         "signal_count": len(search_evaluation.get("signals") or {}),
     }
+    exposure_fatigue = _exposure_fatigue(store)
     feedback = {
         "ignored_codes": _feedback_codes(store.get("ignored")),
         "liked_codes": _feedback_codes(store.get("liked")),
@@ -3455,6 +3500,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "context_gate": context_gate,
         "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
         "exposure_penalties": _exposure_penalties(store),
+        "exposure_fatigue": exposure_fatigue,
     }
     requested_limit = max(1, min(int(payload.get("limit") or 48), 100))
     cache_ttl = int(_config_number(config, "recommendation_cache_minutes", 30, 5, 1440) * 60)
@@ -3713,6 +3759,13 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "topic_evaluation": topic_evaluation,
             "search_evaluation": search_evaluation_summary,
             "context_mixture": context_gate,
+            "exposure_fatigue": {
+                "active": len(exposure_fatigue),
+                "short": sum(1 for row in exposure_fatigue.values() if float(row.get("short") or 0) >= 0.1),
+                "daily": sum(1 for row in exposure_fatigue.values() if float(row.get("daily") or 0) >= 0.1),
+                "long": sum(1 for row in exposure_fatigue.values() if float(row.get("long") or 0) >= 0.1),
+                "max_penalty": max((float(row.get("total") or 0) for row in exposure_fatigue.values()), default=0.0),
+            },
             "session_intent": {
                 "event_count": session_intent["event_count"] + core_search_intent["event_count"],
                 "interaction_events": session_intent["event_count"],
@@ -3894,7 +3947,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         if recorded:
             _save_store(data)
             if _exposure_penalties(data) != before:
-                _invalidate_recommendation_cache()
+                _invalidate_recommendation_cache(hard=False, reason="exposure-fatigue")
         return {"ok": True, "recorded": recorded}
     if action == "model_evaluation":
         data = _ensure_store()
