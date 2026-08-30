@@ -253,6 +253,7 @@ export async function mount(root, sdk) {
     const resourceOutcome = stats.resource_evaluation || {}
     const coreRecall = stats.neighbor_recall || {}
     const coreFeatureQuality = coreRecall.feature_quality || {}
+    const coreEdgeQuality = coreRecall.edge_quality || {}
     const coreOffline = coreRecall.offline_evaluation || {}
     const coverageRepair = coreRecall.coverage_repair_state || {}
     const relationWeights = coreRecall.relation_weights || {}
@@ -280,6 +281,7 @@ export async function mount(root, sdk) {
       ['时间回测', temporalBacktest.recommended_policy === 'temporal' ? '近期增益' : temporalBacktest.recommended_policy === 'durable' ? '长期等权' : '采集中', temporalBacktest.evaluated ? `${temporalBacktest.evaluated} 个历史切点 · 验证 ${Math.round((temporalBacktest.utility_delta?.validation || 0) * 10000) / 100}%` : '等待足够历史样本'],
       ['特征净化', (coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0) + (coreFeatureQuality.dropped_code_prefix_categories || 0), `${(coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0)} 演员重复 · ${coreFeatureQuality.dropped_code_prefix_categories || 0} 番号前缀`],
       ['标题补演员', coreFeatureQuality.title_inferred_actor_features || 0, `MDC-NG 低权重补全 · ${coreRecall.featureless_works || 0} 个仍无关系特征`],
+      ['关系降噪', coreEdgeQuality.pruned_semantic_only || 0, `弱语义单边已剔除 · ${coreEdgeQuality.retained_pairs || 0} 条可信关系`],
       ['覆盖', actorDiversity.unique || 0, `有效演员 ${actorDiversity.effective || 0}`],
       ['路线学习', `${activeRoutes}/${Object.keys(routes).length}`, `${stats.route_evaluation?.eligible || 0} 个成熟样本`],
       ['主题学习', `${activeTopics}/${Object.keys(topicMetrics).length}`, `${stats.topic_evaluation?.total_exposed || 0} 次主题曝光`],

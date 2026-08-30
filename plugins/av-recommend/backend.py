@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 48
-PERSONALIZED_MODEL_VERSION = "personal-v48"
+RECOMMENDATION_ALGORITHM_VERSION = 49
+PERSONALIZED_MODEL_VERSION = "personal-v49"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -4590,6 +4590,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "isolated_works": int(similarity_meta.get("isolated_work_count") or 0),
                 "featureless_works": int(similarity_meta.get("featureless_work_count") or 0),
                 "graph_coverage_percent": float(similarity_meta.get("graph_coverage_percent") or 0),
+                "edge_quality": dict(similarity_meta.get("edge_quality") or {}),
                 "scored": sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0),
                 "selected": sum(1 for item in scored if {"core-neighbor", "core-graph"} & set(item.get("recall_sources") or [])),
                 "direct_selected": sum(1 for item in scored if "core-neighbor" in (item.get("recall_sources") or [])),
