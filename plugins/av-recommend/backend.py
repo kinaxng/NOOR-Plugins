@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 43
-PERSONALIZED_MODEL_VERSION = "personal-v43"
+RECOMMENDATION_ALGORITHM_VERSION = 44
+PERSONALIZED_MODEL_VERSION = "personal-v44"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -1149,6 +1149,26 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
             "actors": [str(value).strip() for value in (item.get("actors") or []) if str(value or "").strip()][:8],
             "categories": [str(value).strip() for value in (item.get("categories") or []) if str(value or "").strip()][:12],
         })
+        summary = item.get("resource_summary") if isinstance(item.get("resource_summary"), dict) else {}
+        providers = [
+            str(provider.get("name") or provider.get("provider") or "").strip()[:80]
+            for provider in summary.get("providers") or []
+            if isinstance(provider, dict) and str(provider.get("name") or provider.get("provider") or "").strip()
+        ]
+        resource_snapshot = {
+            "total": max(0, int(summary.get("total") or 0)),
+            "providers": list(dict.fromkeys(providers))[:8],
+            "has_subtitle": bool(item.get("has_cnsub") or summary.get("has_subtitle")),
+            "has_cracked": bool(item.get("is_cracked") or summary.get("has_cracked")),
+            "has_uncensored": bool(item.get("is_uncensored") or summary.get("has_uncensored")),
+            "has_private": bool(summary.get("has_private")),
+            "has_public": bool(summary.get("has_public")),
+            "best_size_mb": round(max(0.0, float(item.get("best_resource_size_mb") or 0)), 1),
+        }
+        # Keep the latest complete snapshot; an empty payload from an older UI
+        # must not erase resource evidence already attached to this exposure.
+        if resource_snapshot["total"] or any(resource_snapshot[key] for key in ("has_subtitle", "has_cracked", "has_private", "has_public")):
+            row["resource_snapshot"] = resource_snapshot
         impression_history = [entry for entry in (row.get("impression_history") or []) if isinstance(entry, dict)]
         impression_history.append({"at": now, "rank": rank, "batch_id": batch_id})
         row["impression_history"] = impression_history[-48:]
@@ -1454,6 +1474,91 @@ def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> di
         "counterfactual_method": "strategy_rank_stratified_fractional_attribution",
         "minimum_adaptation_sample": 20,
         "generated_at": now_ms,
+    }
+
+
+def _resource_outcome_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    """Estimate resource-feature value from mature recommendation outcomes.
+
+    This is observational rather than causal. Adaptation therefore requires
+    treated and control support, uses rank/strategy strata, Bayesian shrinkage,
+    and is capped to a small multiplier around the user's explicit preference.
+    """
+    now_ms = int(now_ms or _now_ms())
+    mature_age_ms = 7 * 86400 * 1000
+    cohorts: list[dict[str, Any]] = []
+    provider_counts: Counter = Counter()
+    for row in (store.get("exposures") or {}).values():
+        if not isinstance(row, dict) or not isinstance(row.get("resource_snapshot"), dict):
+            continue
+        value = _conversion_value(row)
+        if value <= 0 and now_ms - int(row.get("first_seen_at") or now_ms) < mature_age_ms:
+            continue
+        snapshot = row["resource_snapshot"]
+        providers = {str(name) for name in snapshot.get("providers") or [] if str(name)}
+        provider_counts.update(providers)
+        total = max(0, int(snapshot.get("total") or 0))
+        features = {
+            "subtitle": bool(snapshot.get("has_subtitle")),
+            "cracked": bool(snapshot.get("has_cracked")),
+            "uncensored": bool(snapshot.get("has_uncensored")),
+            "private_tracker": bool(snapshot.get("has_private")),
+            "public_resource": bool(snapshot.get("has_public")),
+            "multi_provider": len(providers) >= 2,
+            "availability_4plus": total >= 4,
+        }
+        features.update({f"provider:{provider}": True for provider in providers})
+        rank = int(row.get("converted_rank") or row.get("last_rank") or 0)
+        strategy = str(row.get("converted_strategy") or row.get("last_strategy") or "ranking")
+        cohorts.append({"value": value, "features": features, "stratum": f"{strategy}:{'top10' if 0 < rank <= 10 else 'top24' if rank <= 24 else 'tail'}"})
+
+    feature_names = {
+        "subtitle", "cracked", "uncensored", "private_tracker", "public_resource", "multi_provider", "availability_4plus",
+        *(f"provider:{name}" for name, count in provider_counts.items() if count >= 5),
+    }
+    metrics: dict[str, dict[str, Any]] = {}
+    weights: dict[str, float] = {}
+    for feature in sorted(feature_names):
+        treated = [row for row in cohorts if row["features"].get(feature)]
+        control = [row for row in cohorts if not row["features"].get(feature)]
+        treated_sum = sum(float(row["value"]) for row in treated)
+        control_sum = sum(float(row["value"]) for row in control)
+        treated_rate = (treated_sum + 2) / (len(treated) + 10)
+        control_rate = (control_sum + 2) / (len(control) + 10)
+        strata: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"treated": [], "control": []})
+        for row in cohorts:
+            strata[row["stratum"]]["treated" if row["features"].get(feature) else "control"].append(float(row["value"]))
+        lift_sum = support_sum = 0.0
+        comparable_strata = 0
+        for arms in strata.values():
+            if not arms["treated"] or not arms["control"]:
+                continue
+            support = 2 * len(arms["treated"]) * len(arms["control"]) / (len(arms["treated"]) + len(arms["control"]))
+            lift_sum += (sum(arms["treated"]) / len(arms["treated"]) - sum(arms["control"]) / len(arms["control"])) * support
+            support_sum += support
+            comparable_strata += 1
+        stratified_lift = lift_sum / support_sum if support_sum else 0.0
+        minimum_arm = min(len(treated), len(control))
+        reliability = minimum_arm / (minimum_arm + 25) * support_sum / (support_sum + 20)
+        active = minimum_arm >= 15 and support_sum >= 15
+        raw_delta = (treated_rate - control_rate) * 0.45 + stratified_lift * 0.55
+        factor = max(0.9, min(1.1, 1 + raw_delta * reliability)) if active else 1.0
+        weights[feature] = round(factor, 3)
+        metrics[feature] = {
+            "treated": len(treated), "control": len(control),
+            "treated_rate": round(treated_rate, 4), "control_rate": round(control_rate, 4),
+            "stratified_lift": round(stratified_lift, 4), "comparable_support": round(support_sum, 1),
+            "strata": comparable_strata, "reliability": round(reliability, 3),
+            "weight": round(factor, 3), "adaptation_status": "active" if active else "observing",
+        }
+    return {
+        "version": 1,
+        "status": "active" if any(abs(weight - 1) >= 0.005 for weight in weights.values()) else "collecting",
+        "eligible": len(cohorts),
+        "minimum_arm_sample": 15,
+        "features": metrics,
+        "weights": weights,
+        "interpretation": "观察性资源特征转化校准；按推荐位置与策略分层，并限制在 ±10%",
     }
 
 
@@ -2705,6 +2810,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     trend_categories: dict[str, float] = feedback.get("trend_categories") or {}
     outcome_model: dict[str, Any] = feedback.get("outcome_model") or {}
     route_weights: dict[str, float] = feedback.get("route_weights") or {}
+    resource_feature_weights: dict[str, float] = feedback.get("resource_feature_weights") or {}
     interest_topics: list[dict[str, Any]] = feedback.get("interest_topics") or []
     topic_weights: dict[str, float] = feedback.get("topic_weights") or {}
     liked_topics: Counter = feedback.get("liked_topics") or Counter()
@@ -2747,6 +2853,9 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     penalty_score = 0.0
     outcome_calibration_score = 0.0
     route_calibration_score = 0.0
+    resource_calibration_score = 0.0
+    resource_calibration_factor = 1.0
+    resource_features: list[str] = []
     trend_preference_score = 0.0
     freshness_score = 0.0
     interest_topic_score = 0.0
@@ -3142,6 +3251,29 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         actionability_score += boost
         reasons.append("破解特征")
 
+    resource_summary = item.get("resource_summary") if isinstance(item.get("resource_summary"), dict) else {}
+    resource_providers = [str(row.get("name") or "") for row in resource_summary.get("providers") or [] if isinstance(row, dict) and row.get("name")]
+    resource_features = [
+        *(["subtitle"] if item.get("has_cnsub") else []),
+        *(["cracked"] if item.get("is_cracked") else []),
+        *(["uncensored"] if item.get("is_uncensored") else []),
+        *(["private_tracker"] if resource_summary.get("has_private") else []),
+        *(["public_resource"] if resource_summary.get("has_public") else []),
+        *(["multi_provider"] if len(resource_providers) >= 2 else []),
+        *(["availability_4plus"] if int(resource_summary.get("total") or 0) >= 4 else []),
+        *(f"provider:{name}" for name in resource_providers),
+    ]
+    learned_resource_factors = [float(resource_feature_weights.get(feature) or 1.0) for feature in resource_features if feature in resource_feature_weights]
+    if actionability_score > 0 and learned_resource_factors:
+        resource_calibration_factor = max(0.9, min(1.1, sum(learned_resource_factors) / len(learned_resource_factors)))
+        resource_calibration_score = actionability_score * (resource_calibration_factor - 1)
+        score += resource_calibration_score
+        actionability_score += resource_calibration_score
+        if resource_calibration_score >= 0.5:
+            reasons.append("资源特征转化较好")
+        elif resource_calibration_score <= -0.5:
+            reasons.append("资源特征谨慎降权")
+
     size_mb = float(item.get("best_resource_size_mb") or 0)
     if size_mb > 0:
         boost = min(4, max(0, math.log(max(size_mb, 1), 2) - 10))
@@ -3287,6 +3419,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         {"type": "context", "label": "长期/即时混合门控", "score": round(-context_mixture_penalty, 1), "evidence": {"alignment": round(context_alignment, 3), **context_gate}},
         {"type": "outcome", "label": "入库结果校准", "score": round(outcome_calibration_score, 1)},
         {"type": "resource", "label": "资源可用性", "score": round(actionability_score, 1)},
+        {"type": "resource_calibration", "label": "资源结果校准", "score": round(resource_calibration_score, 1), "evidence": {"factor": round(resource_calibration_factor, 3), "features": resource_features[:8]}},
         {"type": "quality", "label": "作品质量", "score": round(quality_score, 1)},
         {"type": "freshness", "label": "发布时间", "score": round(freshness_score, 1), "evidence": freshness},
     ]
@@ -3334,6 +3467,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "recommendation_explanation": explanation,
         "outcome_calibration": round(outcome_calibration_score, 1),
         "route_calibration": round(route_calibration_score, 1),
+        "resource_calibration": {"factor": round(resource_calibration_factor, 3), "score": round(resource_calibration_score, 2), "features": resource_features[:8]},
         "interest_topic": matched_interest_topic or {},
         "interest_topic_hypothesis": interest_topic_hypothesis,
         "search_intent_matches": matched_search_combinations[:3],
@@ -3365,6 +3499,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "outcomes": round(outcome_calibration_score, 1),
             "recall_route": round(route_calibration_score, 1),
             "resources": round(actionability_score, 1),
+            "resource_calibration": round(resource_calibration_score, 1),
             "quality": round(quality_score, 1),
             "freshness": round(freshness_score, 1),
             "penalty": round(penalty_score, 1),
@@ -3951,6 +4086,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         _save_store(store)
     model_selection = _select_ranking_model(config, store)
     route_evaluation = _route_evaluation(store)
+    resource_evaluation = _resource_outcome_evaluation(store)
     exploration_evaluation = _exploration_evaluation(store)
     topic_evaluation = _topic_evaluation(store)
     session_intent = _session_intent_summary(store)
@@ -3990,6 +4126,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "search_intent": core_search_intent,
         "context_gate": context_gate,
         "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
+        "resource_feature_weights": dict(resource_evaluation.get("weights") or {}),
         "exposure_penalties": _exposure_penalties(store),
         "exposure_fatigue": exposure_fatigue,
     }
@@ -4018,6 +4155,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "disliked_categories": dict(feedback["disliked_categories"]),
         "exposure_penalties": feedback["exposure_penalties"],
         "route_weights": feedback["route_weights"],
+        "resource_feature_weights": feedback["resource_feature_weights"],
         "topic_weights": feedback["topic_weights"],
         "liked_topics": dict(feedback["liked_topics"]),
         "disliked_topics": dict(feedback["disliked_topics"]),
@@ -4061,6 +4199,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "disliked_categories": dict(feedback["disliked_categories"]),
         "exposure_penalties": feedback["exposure_penalties"],
         "route_weights": feedback["route_weights"],
+        "resource_feature_weights": feedback["resource_feature_weights"],
         "topic_weights": feedback["topic_weights"],
         "liked_topics": dict(feedback["liked_topics"]),
         "disliked_topics": dict(feedback["disliked_topics"]),
@@ -4203,6 +4342,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     recalled_candidate_count = len(candidates)
     if source_mode == "full":
         candidates = await asyncio.to_thread(_shortlist_candidates, candidates, profile, limit=max(180, requested_limit * 3))
+    await _merge_cached_resource_intelligence({"items": candidates})
 
     def score_candidates() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         diagnostics: list[dict[str, Any]] = []
@@ -4213,10 +4353,6 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
 
     scored, filtered_diagnostics = await asyncio.to_thread(score_candidates)
     mark_timing("candidate_scoring")
-    # Intelligence Core already owns durable resource observations. Hydrate
-    # those first so live providers are queried only for genuinely unknown
-    # cards, rather than re-confirming every recommendation on each refresh.
-    await _merge_cached_resource_intelligence({"items": scored})
     # A small first pass lets resource actionability influence ranking without
     # making the initial recommendation request excessively expensive.
     initial_resource_config = {**config, "resource_enrich_limit": 16, "resource_enrich_budget_seconds": 4}
@@ -4300,6 +4436,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "model_evaluation": _model_evaluation(store),
             "shadow_evaluation": _shadow_model_evaluation(store),
             "route_evaluation": route_evaluation,
+            "resource_evaluation": resource_evaluation,
             "exploration_evaluation": exploration_evaluation,
             "topic_evaluation": topic_evaluation,
             "search_evaluation": search_evaluation_summary,

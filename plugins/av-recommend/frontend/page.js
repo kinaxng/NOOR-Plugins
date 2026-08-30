@@ -421,6 +421,11 @@ export async function mount(root, sdk) {
           exploration_kind: item.exploration_kind || '',
           interest_topic: item.interest_topic || {},
           interest_topic_hypothesis: item.interest_topic_hypothesis || {},
+          resource_summary: item.resource_summary || {},
+          has_cnsub: !!item.has_cnsub,
+          is_cracked: !!item.is_cracked,
+          is_uncensored: !!item.is_uncensored,
+          best_resource_size_mb: item.best_resource_size_mb || 0,
         })),
       },
     }).catch(() => {})

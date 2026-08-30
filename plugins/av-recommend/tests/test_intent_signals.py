@@ -112,8 +112,8 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 43
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v43"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 44
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v44"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -323,6 +323,43 @@ def test_v42_library_profile_reuses_matching_core_revision(monkeypatch) -> None:
     monkeypatch.setattr(backend, "async_session_maker", lambda: (_ for _ in ()).throw(AssertionError("hot profile must not open the database")))
     assert asyncio.run(backend._library_profile()) is expected
 
+
+def test_v44_resource_outcomes_collect_snapshots_and_adapt_only_with_controls(monkeypatch) -> None:
+    backend = _backend()
+    now = 1_800_000_000_000
+    monkeypatch.setattr(backend, "_now_ms", lambda: now)
+    store = {"exposures": {}, "exposure_batches": []}
+    assert backend._record_exposure_batch(store, "resource:1", [{
+        "code": "AAA-001", "rank": 5, "model_version": backend.PERSONALIZED_MODEL_VERSION,
+        "resource_summary": {"total": 5, "providers": [{"name": "AVDB"}], "has_public": True},
+        "is_cracked": True, "has_cnsub": True, "best_resource_size_mb": 4096,
+    }]) == 1
+    snapshot = store["exposures"]["AAA-001"]["resource_snapshot"]
+    assert snapshot == {
+        "total": 5, "providers": ["AVDB"], "has_subtitle": True, "has_cracked": True,
+        "has_uncensored": False, "has_private": False, "has_public": True,
+        "best_size_mb": 4096.0,
+    }
+
+    sparse = backend._resource_outcome_evaluation(store, now_ms=now)
+    assert sparse["status"] == "collecting"
+    assert all(weight == 1.0 for weight in sparse["weights"].values())
+
+    exposures = {}
+    for index in range(40):
+        cracked = index < 20
+        exposures[f"AAA-{index:03d}"] = {
+            "first_seen_at": now - 8 * 86_400_000,
+            "last_rank": 5 + index % 4,
+            "last_strategy": "ranking",
+            "conversion_value": 1.0 if cracked else 0.0,
+            "resource_snapshot": {"total": 5 if cracked else 1, "providers": ["AVDB"] if cracked else ["JavDB"], "has_cracked": cracked, "has_public": True},
+        }
+    mature = backend._resource_outcome_evaluation({"exposures": exposures}, now_ms=now)
+    assert mature["status"] == "active"
+    assert mature["features"]["cracked"]["adaptation_status"] == "active"
+    assert mature["weights"]["cracked"] > 1.0
+    assert mature["weights"]["availability_4plus"] > 1.0
 
 def test_coverage_repair_queue_is_bounded_actionable_and_cooled_down(monkeypatch) -> None:
     backend = _backend()
