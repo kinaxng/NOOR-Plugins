@@ -416,6 +416,7 @@ export async function mount(root, sdk) {
           score: item.score || 0,
           model_version: item.model_version || state.data?.model?.version || 'unknown',
           shadow_ranks: item.shadow_ranks || {},
+          resource_shadow_ranks: item.resource_shadow_ranks || {},
           recall_sources: item.recall_sources || [],
           is_exploration: !!item.is_exploration,
           exploration_kind: item.exploration_kind || '',

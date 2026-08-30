@@ -46,9 +46,11 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 44
-PERSONALIZED_MODEL_VERSION = "personal-v44"
+RECOMMENDATION_ALGORITHM_VERSION = 45
+PERSONALIZED_MODEL_VERSION = "personal-v45"
 STABLE_MODEL_VERSION = "stable-v1"
+RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
+RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
     "feedback:like": 0.35,
@@ -1245,6 +1247,21 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
                 "best_rank": min([value for value in (int(evidence.get("best_rank") or 0), shadow_rank) if value > 0] or [0]),
             })
             shadow_models[shadow_version] = evidence
+        resource_shadow_models = row.setdefault("resource_shadow_models", {})
+        raw_resource_ranks = item.get("resource_shadow_ranks") if isinstance(item.get("resource_shadow_ranks"), dict) else {}
+        for shadow_version in (RESOURCE_LEARNED_MODEL_VERSION, RESOURCE_FIXED_MODEL_VERSION):
+            shadow_rank = max(0, int(raw_resource_ranks.get(shadow_version) or 0))
+            if shadow_rank <= 0:
+                continue
+            evidence = resource_shadow_models.get(shadow_version) if isinstance(resource_shadow_models.get(shadow_version), dict) else {}
+            evidence.update({
+                "batch_count": int(evidence.get("batch_count") or 0) + 1,
+                "first_seen_at": int(evidence.get("first_seen_at") or now),
+                "last_seen_at": now,
+                "last_rank": shadow_rank,
+                "best_rank": min([value for value in (int(evidence.get("best_rank") or 0), shadow_rank) if value > 0] or [0]),
+            })
+            resource_shadow_models[shadow_version] = evidence
         row["last_model"] = model_version
         row["last_rank"] = rank
         exposures[code] = row
@@ -1378,6 +1395,69 @@ def _shadow_model_evaluation(store: dict[str, Any]) -> dict[str, Any]:
         "reason": reason,
         "minimum_qualified_sample": 20,
         "minimum_decisive_sample": 12,
+    }
+
+
+def _resource_shadow_evaluation(store: dict[str, Any]) -> dict[str, Any]:
+    versions = (RESOURCE_LEARNED_MODEL_VERSION, RESOURCE_FIXED_MODEL_VERSION)
+    metrics = {version: {"shared_exposures": 0, "qualified": 0, "verified": 0, "top10": 0, "gain": 0.0, "rank_sum": 0} for version in versions}
+    paired_qualified = learned_wins = fixed_wins = ties = 0
+    paired_exposures = 0
+    for row in (store.get("exposures") or {}).values():
+        if not isinstance(row, dict):
+            continue
+        models = row.get("resource_shadow_models") if isinstance(row.get("resource_shadow_models"), dict) else {}
+        ranks = {version: int((models.get(version) or {}).get("last_rank") or 0) for version in versions}
+        if not all(ranks.values()):
+            continue
+        paired_exposures += 1
+        value = _conversion_value(row)
+        qualified = value >= QUALIFIED_CONVERSION_THRESHOLD
+        verified = value >= VERIFIED_CONVERSION_THRESHOLD
+        for version, rank in ranks.items():
+            metric = metrics[version]
+            metric["shared_exposures"] += 1
+            metric["qualified"] += int(qualified)
+            metric["verified"] += int(verified)
+            metric["top10"] += int(qualified and rank <= 10)
+            metric["gain"] += value / math.log2(rank + 1)
+            metric["rank_sum"] += rank
+        if qualified:
+            paired_qualified += 1
+            if ranks[RESOURCE_LEARNED_MODEL_VERSION] < ranks[RESOURCE_FIXED_MODEL_VERSION]:
+                learned_wins += 1
+            elif ranks[RESOURCE_FIXED_MODEL_VERSION] < ranks[RESOURCE_LEARNED_MODEL_VERSION]:
+                fixed_wins += 1
+            else:
+                ties += 1
+    for metric in metrics.values():
+        exposed = int(metric["shared_exposures"])
+        qualified = int(metric["qualified"])
+        metric["average_rank"] = round(float(metric.pop("rank_sum")) / max(exposed, 1), 2)
+        metric["gain_per_exposure"] = round(float(metric.pop("gain")) / max(exposed, 1), 5)
+        metric["top10_rate"] = round(int(metric["top10"]) / max(qualified, 1), 4)
+    decisive = learned_wins + fixed_wins
+    learned_interval = _wilson_interval(learned_wins, decisive)
+    fixed_interval = _wilson_interval(fixed_wins, decisive)
+    learned_gain = float(metrics[RESOURCE_LEARNED_MODEL_VERSION]["gain_per_exposure"])
+    fixed_gain = float(metrics[RESOURCE_FIXED_MODEL_VERSION]["gain_per_exposure"])
+    policy, reason = "collecting", "至少需要 20 个共享转化和 12 个非平局样本"
+    if paired_qualified >= 20 and decisive >= 12:
+        if learned_interval[0] > 0.5 and learned_gain > fixed_gain * 1.03:
+            policy, reason = "learned", "学习资源权重在共享转化上显著优于固定基线"
+        elif fixed_interval[0] > 0.5 and fixed_gain > learned_gain * 1.03:
+            policy, reason = "fixed", "固定资源权重在共享转化上显著优于学习策略"
+        else:
+            policy, reason = "inconclusive", "共享转化尚未形成显著胜负"
+    return {
+        "models": metrics, "paired_exposures": paired_exposures, "paired_qualified": paired_qualified, "decisive": decisive,
+        "wins": {"learned": learned_wins, "fixed": fixed_wins, "ties": ties},
+        "win_intervals": {
+            "learned": {"lower": round(learned_interval[0], 4), "upper": round(learned_interval[1], 4)},
+            "fixed": {"lower": round(fixed_interval[0], 4), "upper": round(fixed_interval[1], 4)},
+        },
+        "recommended_policy": policy, "reason": reason,
+        "minimum_qualified_sample": 20, "minimum_decisive_sample": 12,
     }
 
 
@@ -3456,6 +3536,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "ranking_scores": {
             PERSONALIZED_MODEL_VERSION: max(0, min(92, round(personal_ranking_score))),
             STABLE_MODEL_VERSION: max(0, min(92, round(stable_ranking_score))),
+            RESOURCE_LEARNED_MODEL_VERSION: max(0, min(92, round(personal_ranking_score))),
+            RESOURCE_FIXED_MODEL_VERSION: max(0, min(92, round(personal_ranking_score - resource_calibration_score))),
         },
         "personalized_score": round(personalized_score, 1),
         "actionability_score": round(actionability_score, 1),
@@ -4087,6 +4169,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     model_selection = _select_ranking_model(config, store)
     route_evaluation = _route_evaluation(store)
     resource_evaluation = _resource_outcome_evaluation(store)
+    resource_shadow_evaluation = _resource_shadow_evaluation(store)
     exploration_evaluation = _exploration_evaluation(store)
     topic_evaluation = _topic_evaluation(store)
     session_intent = _session_intent_summary(store)
@@ -4362,6 +4445,11 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     mark_timing("initial_resources")
     scored.sort(key=lambda x: (x["score"], (x.get("resource_summary") or {}).get("total") or 0, x.get("magnets_count") or 0, x.get("release_date") or ""), reverse=True)
     shadow_ranks = await asyncio.to_thread(_shadow_rank_map, scored)
+    resource_shadow_ranks = await asyncio.to_thread(
+        _shadow_rank_map,
+        scored,
+        (RESOURCE_LEARNED_MODEL_VERSION, RESOURCE_FIXED_MODEL_VERSION),
+    )
     # Full mode can contain thousands of candidates. Diversifying all of them
     # is O(n²), while only a bounded head can reach this response or its
     # exploration pool. Preserve the scored tail without blocking the loop.
@@ -4387,6 +4475,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         item["model_version"] = model_selection["version"]
         item["shadow_ranks"] = dict(shadow_ranks.get(_norm_code(item.get("code"))) or {})
         item["shadow_ranks"][model_selection["version"]] = rank
+        item["resource_shadow_ranks"] = dict(resource_shadow_ranks.get(_norm_code(item.get("code"))) or {})
     mark_timing("sequence_controls")
     # Diversification can promote candidates that were outside the first-pass
     # window. Confirm the cards that will actually be displayed as a second
@@ -4437,6 +4526,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "shadow_evaluation": _shadow_model_evaluation(store),
             "route_evaluation": route_evaluation,
             "resource_evaluation": resource_evaluation,
+            "resource_shadow_evaluation": resource_shadow_evaluation,
             "exploration_evaluation": exploration_evaluation,
             "topic_evaluation": topic_evaluation,
             "search_evaluation": search_evaluation_summary,

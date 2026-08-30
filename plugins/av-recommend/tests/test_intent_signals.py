@@ -112,8 +112,8 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 44
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v44"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 45
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v45"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -331,6 +331,10 @@ def test_v44_resource_outcomes_collect_snapshots_and_adapt_only_with_controls(mo
     store = {"exposures": {}, "exposure_batches": []}
     assert backend._record_exposure_batch(store, "resource:1", [{
         "code": "AAA-001", "rank": 5, "model_version": backend.PERSONALIZED_MODEL_VERSION,
+        "resource_shadow_ranks": {
+            backend.RESOURCE_LEARNED_MODEL_VERSION: 2,
+            backend.RESOURCE_FIXED_MODEL_VERSION: 7,
+        },
         "resource_summary": {"total": 5, "providers": [{"name": "AVDB"}], "has_public": True},
         "is_cracked": True, "has_cnsub": True, "best_resource_size_mb": 4096,
     }]) == 1
@@ -340,6 +344,9 @@ def test_v44_resource_outcomes_collect_snapshots_and_adapt_only_with_controls(mo
         "has_uncensored": False, "has_private": False, "has_public": True,
         "best_size_mb": 4096.0,
     }
+    resource_models = store["exposures"]["AAA-001"]["resource_shadow_models"]
+    assert resource_models[backend.RESOURCE_LEARNED_MODEL_VERSION]["last_rank"] == 2
+    assert resource_models[backend.RESOURCE_FIXED_MODEL_VERSION]["last_rank"] == 7
 
     sparse = backend._resource_outcome_evaluation(store, now_ms=now)
     assert sparse["status"] == "collecting"
@@ -360,6 +367,28 @@ def test_v44_resource_outcomes_collect_snapshots_and_adapt_only_with_controls(mo
     assert mature["features"]["cracked"]["adaptation_status"] == "active"
     assert mature["weights"]["cracked"] > 1.0
     assert mature["weights"]["availability_4plus"] > 1.0
+
+
+def test_v45_resource_shadow_policy_requires_paired_confident_outcomes() -> None:
+    backend = _backend()
+
+    def store(count: int) -> dict:
+        return {"exposures": {
+            f"AAA-{index:03d}": {
+                "conversion_value": 1.0,
+                "resource_shadow_models": {
+                    backend.RESOURCE_LEARNED_MODEL_VERSION: {"last_rank": 1},
+                    backend.RESOURCE_FIXED_MODEL_VERSION: {"last_rank": 10},
+                },
+            }
+            for index in range(count)
+        }}
+
+    assert backend._resource_shadow_evaluation(store(10))["recommended_policy"] == "collecting"
+    mature = backend._resource_shadow_evaluation(store(20))
+    assert mature["recommended_policy"] == "learned"
+    assert mature["wins"]["learned"] == 20
+    assert mature["paired_qualified"] == 20
 
 def test_coverage_repair_queue_is_bounded_actionable_and_cooled_down(monkeypatch) -> None:
     backend = _backend()
