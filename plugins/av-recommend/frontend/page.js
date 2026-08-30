@@ -258,7 +258,7 @@ export async function mount(root, sdk) {
       ['路线学习', `${activeRoutes}/${Object.keys(routes).length}`, `${stats.route_evaluation?.eligible || 0} 个成熟样本`],
       ['主题学习', `${activeTopics}/${Object.keys(topicMetrics).length}`, `${stats.topic_evaluation?.total_exposed || 0} 次主题曝光`],
       ['当前意图', stats.session_intent?.event_count || 0, '12 小时渐进衰减'],
-      ['搜索学习', `${searchEvaluation.adaptive_signals || 0}/${Object.keys(searchEvaluation.signals || {}).length}`, `${searchEvaluation.eligible_events || 0} 个成熟样本`],
+      ['搜索学习', `${searchEvaluation.adaptive_signals || 0}/${searchEvaluation.signal_count || 0}`, `${searchEvaluation.eligible_events || 0} 个成熟样本`],
     ]
     for (const [name, value, desc] of cards) {
       const card = el('div', 'av-rec-stat')

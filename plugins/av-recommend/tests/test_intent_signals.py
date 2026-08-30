@@ -53,8 +53,8 @@ def test_topic_feedback_is_counted_without_hard_exclusion() -> None:
 
 def test_v27_search_intent_scores_canonical_actor_category_and_title_term() -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 27
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v27"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 28
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v28"
     identity = backend.actor_identity_key("吉沢明歩")
     profile = {
         "codes": set(), "actor_identities": Counter(), "actors": Counter(),
@@ -68,9 +68,11 @@ def test_v27_search_intent_scores_canonical_actor_category_and_title_term() -> N
         "categories": ["已婚妇女"], "magnets_count": 1, "release_date": "2026-01-01",
     }
     baseline = backend._candidate_score(item, profile, {}, {})
+    combination_id = f"combo:actor:{identity}|category:人妻"
     searched = backend._candidate_score(item, profile, {}, {
         "search_intent": {
             "actors": {identity: 1.0}, "categories": {"人妻": 1.0}, "terms": {"秘密": 1.0},
+            "combinations": {combination_id: 1.0}, "combination_labels": {combination_id: "吉沢明歩 × 人妻"},
         },
     })
 
@@ -78,4 +80,5 @@ def test_v27_search_intent_scores_canonical_actor_category_and_title_term() -> N
     assert baseline["categories"][:2] == ["人妻", "剧情"]
     assert searched["score"] > baseline["score"]
     assert searched["score_breakdown"]["search_intent"] >= 1.7
-    assert "当前搜索方向" in searched["reasons"]
+    assert "当前组合搜索方向" in searched["reasons"]
+    assert searched["search_intent_matches"] == [{"id": combination_id, "label": "吉沢明歩 × 人妻", "strength": 1.0}]

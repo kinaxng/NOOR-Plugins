@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 27
-PERSONALIZED_MODEL_VERSION = "personal-v27"
+RECOMMENDATION_ALGORITHM_VERSION = 28
+PERSONALIZED_MODEL_VERSION = "personal-v28"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -2352,6 +2352,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     interest_topic_score = 0.0
     session_intent_score = 0.0
     search_intent_score = 0.0
+    matched_search_combinations: list[dict[str, Any]] = []
     topic_feedback_adjustment = 0.0
     matched_interest_topic: dict[str, Any] | None = None
     passive_exposure_penalty = float(exposure_penalties.get(code) or 0)
@@ -2571,12 +2572,24 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     search_category_strength = sum(float((search_intent.get("categories") or {}).get(category) or 0) * _generic_category_factor(category) for category in candidate_categories)
     candidate_terms = semantic_tokens(_title_text(item)).get("weighted") or {}
     search_term_strength = sum(float(weight) * float(candidate_terms.get(term) or 0) for term, weight in (search_intent.get("terms") or {}).items())
-    search_intent_score = min(2.2, search_actor_strength * 1.1) + min(1.5, search_category_strength * 0.6) + min(1.8, search_term_strength * 0.35)
+    candidate_search_signals = {f"actor:{identity}" for identity in actor_identities} | {f"category:{category}" for category in candidate_categories} | {f"term:{term}" for term in candidate_terms}
+    for key, strength in (search_intent.get("combinations") or {}).items():
+        members = str(key).removeprefix("combo:").split("|")
+        if len(members) != 2 or not set(members) <= candidate_search_signals:
+            continue
+        matched_search_combinations.append({
+            "id": str(key),
+            "label": str((search_intent.get("combination_labels") or {}).get(key) or " × ".join(members)),
+            "strength": round(float(strength or 0), 3),
+        })
+    matched_search_combinations.sort(key=lambda row: float(row["strength"]), reverse=True)
+    combination_strength = sum(float(row["strength"]) for row in matched_search_combinations[:3])
+    search_intent_score = min(2.2, search_actor_strength * 1.1) + min(1.5, search_category_strength * 0.6) + min(1.8, search_term_strength * 0.35) + min(1.8, combination_strength * 0.5)
     if search_intent_score >= 0.25:
         score += search_intent_score
         personalized_score += search_intent_score
         trend_preference_score += search_intent_score
-        reasons.append("当前搜索方向")
+        reasons.append("当前组合搜索方向" if matched_search_combinations else "当前搜索方向")
 
     outcome_signals: list[tuple[float, float]] = []
     actor_outcomes = outcome_model.get("actors") if isinstance(outcome_model.get("actors"), dict) else {}
@@ -2823,7 +2836,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         {"type": "trend", "label": "近期趋势", "score": round(trend_preference_score, 1)},
         {"type": "topic", "label": "组合兴趣主题", "score": round(interest_topic_score, 1), "evidence": matched_interest_topic or {}},
         {"type": "session", "label": "当前兴趣方向", "score": round(session_intent_score, 1)},
-        {"type": "search", "label": "当前搜索方向", "score": round(search_intent_score, 1)},
+        {"type": "search", "label": "当前搜索方向", "score": round(search_intent_score, 1), "evidence": matched_search_combinations[:3]},
         {"type": "outcome", "label": "入库结果校准", "score": round(outcome_calibration_score, 1)},
         {"type": "resource", "label": "资源可用性", "score": round(actionability_score, 1)},
         {"type": "quality", "label": "作品质量", "score": round(quality_score, 1)},
@@ -2869,6 +2882,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "route_calibration": round(route_calibration_score, 1),
         "interest_topic": matched_interest_topic or {},
         "interest_topic_hypothesis": interest_topic_hypothesis,
+        "search_intent_matches": matched_search_combinations[:3],
         "neighbor_score": round(neighbor_score, 3),
         "neighbor_confidence": round(float(item.get("neighbor_confidence") or 0), 3),
         "neighbor_evidence": list(item.get("neighbor_evidence") or [])[:5],
@@ -3365,6 +3379,14 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     topic_evaluation = _topic_evaluation(store)
     session_intent = _session_intent_summary(store)
     core_search_intent = search_intent_summary()
+    search_evaluation = core_search_intent.get("evaluation") or {}
+    search_evaluation_summary = {
+        "eligible_events": int(search_evaluation.get("eligible_events") or 0),
+        "qualified_events": int(search_evaluation.get("qualified_events") or 0),
+        "verified_events": int(search_evaluation.get("verified_events") or 0),
+        "adaptive_signals": int(search_evaluation.get("adaptive_signals") or 0),
+        "signal_count": len(search_evaluation.get("signals") or {}),
+    }
     feedback = {
         "ignored_codes": _feedback_codes(store.get("ignored")),
         "liked_codes": _feedback_codes(store.get("liked")),
@@ -3624,7 +3646,10 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "top_series": _top(profile.get("series") or Counter(), 8),
             "top_directors": _top(profile.get("directors") or Counter(), 8),
             "top_interest_topics": list((behavior.get("interest_topics") or {}).get("topics") or [])[:8],
-            "current_intent": {"interaction": session_intent, "search": core_search_intent},
+            "current_intent": {
+                "interaction": session_intent,
+                "search": {**{key: value for key, value in core_search_intent.items() if key != "evaluation"}, "evaluation": search_evaluation_summary},
+            },
         },
         "stats": {
             "candidates": len(candidates),
@@ -3640,7 +3665,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "route_evaluation": route_evaluation,
             "exploration_evaluation": exploration_evaluation,
             "topic_evaluation": topic_evaluation,
-            "search_evaluation": core_search_intent["evaluation"],
+            "search_evaluation": search_evaluation_summary,
             "session_intent": {
                 "event_count": session_intent["event_count"] + core_search_intent["event_count"],
                 "interaction_events": session_intent["event_count"],
