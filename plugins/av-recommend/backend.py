@@ -46,7 +46,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 65
+RECOMMENDATION_ALGORITHM_VERSION = 66
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
 RANKING_POLICY_VERSION = 57
@@ -4774,9 +4774,15 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
     if not payload.get("refresh"):
         snapshot = _latest_mode_snapshot(source_mode, requested_limit, ttl_seconds=ttl_seconds)
         if snapshot is not None:
-            if snapshot.get("cache_status", {}).get("status") == "stale":
-                _schedule_recommendation_refresh(config, payload, f"mode-snapshot:{source_mode}:{requested_limit}")
-            return snapshot
+            snapshot_model = str(((snapshot.get("model") or {}).get("version") or ""))
+            current_snapshot = (
+                int(snapshot.get("algorithm_version") or 0) == RECOMMENDATION_ALGORITHM_VERSION
+                and snapshot_model in {PERSONALIZED_MODEL_VERSION, STABLE_MODEL_VERSION}
+            )
+            if current_snapshot:
+                if snapshot.get("cache_status", {}).get("status") == "stale":
+                    _schedule_recommendation_refresh(config, payload, f"mode-snapshot:{source_mode}:{requested_limit}")
+                return snapshot
     elif lock.locked():
         # A startup prewarm or another explicit refresh is already producing
         # this mode.  Wait for that single flight, then reuse its current-model
