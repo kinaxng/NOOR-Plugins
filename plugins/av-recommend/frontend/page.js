@@ -249,6 +249,8 @@ export async function mount(root, sdk) {
     const contextMixture = stats.context_mixture || {}
     const exposureFatigue = stats.exposure_fatigue || {}
     const shadow = stats.shadow_evaluation || {}
+    const resourceShadow = stats.resource_shadow_evaluation || {}
+    const resourceOutcome = stats.resource_evaluation || {}
     const coreRecall = stats.neighbor_recall || {}
     const coreFeatureQuality = coreRecall.feature_quality || {}
     const coreOffline = coreRecall.offline_evaluation || {}
@@ -266,6 +268,8 @@ export async function mount(root, sdk) {
       ['候选池', fmtPool(stats.candidate_pool_total, stats.candidate_pool_today), state.sourceMode === 'full' ? '完整累计+今日' : '历史累计+今日'],
       ['模型', data.model?.version || '-', data.model?.mode === 'auto' ? '自动保护' : '手动选择'],
       ['影子评估', `${shadow.paired_qualified || 0}/${shadow.minimum_qualified_sample || 20}`, shadow.recommended_policy === 'collecting' ? '共享候选静默采样' : (shadow.reason || '共享候选对照')],
+      ['资源学习', `${resourceShadow.paired_qualified || 0}/${resourceShadow.minimum_qualified_sample || 20}`, resourceShadow.recommended_policy === 'collecting' ? '固定权重与学习权重静默对照' : (resourceShadow.reason || '资源策略对照')],
+      ['资源校准', resourceOutcome.status === 'active' ? `${resourceOutcome.eligible || 0} 项` : '采集中', resourceOutcome.status === 'active' ? `${Object.values(resourceOutcome.weights || {}).filter(value => Math.abs(Number(value || 1) - 1) >= 0.01).length} 个资源特征已调整` : '达到对照样本后自动启用'],
       ['Core 邻域', coreRecall.selected || 0, `${coreRecall.core_only_selected || 0} 个独立召回`],
       ['离线找回', coreOffline.hit_rate?.['@20'] != null ? `${Math.round(coreOffline.hit_rate['@20'] * 100)}%` : '待评估', coreOffline.evaluated ? `${coreOffline.evaluated} 部留一 · 覆盖 ${Math.round((coreOffline.coverage || 0) * 100)}%` : '留一邻域审计'],
       ['覆盖修复', `${coverageRepair.enriched || 0}/${coverageRepair.queued || 0}`, `${coreRecall.coverage_repair_queued || 0} 个本轮加入 · ${coverageRepair.failed || 0} 失败`],
@@ -955,7 +959,8 @@ export async function mount(root, sdk) {
       const explanationTitle = document.createElement('summary')
       explanationTitle.textContent = `为什么推荐${interval.lower != null && interval.upper != null ? ` · 置信 ${Math.round(interval.lower)}–${Math.round(interval.upper)}` : ''}`
       const explanationFactors = el('div', 'av-rec-explanation-factors')
-      for (const factor of (explanation.factors || []).slice(0, 6)) {
+      const visibleFactors = (explanation.factors || []).slice(0, 6)
+      for (const factor of visibleFactors) {
         const node = document.createElement('span')
         node.innerHTML = `<em>${escapeHtml(factor.label || factor.type || '证据')}</em><strong>${escapeHtml(Math.round(Number(factor.score) || 0))}</strong>`
         explanationFactors.appendChild(node)
@@ -966,7 +971,26 @@ export async function mount(root, sdk) {
         node.innerHTML = `<em>${escapeHtml(factor.label || '降权')}</em><strong>${escapeHtml(Math.round(Number(factor.score) || 0))}</strong>`
         explanationFactors.appendChild(node)
       }
+      const evidence = el('div', 'av-rec-explanation-evidence')
+      const actorFactor = visibleFactors.find(factor => factor?.type === 'actor')
+      const actorEvidence = Array.isArray(actorFactor?.evidence) ? actorFactor.evidence : []
+      if (actorEvidence.length) {
+        const mapped = actorEvidence.filter(row => row?.identity_source === 'mdc-ng').length
+        const names = actorEvidence.map(row => `${row.name}（媒体库 ${row.library_count || 0} 部）`).join('、')
+        evidence.appendChild(el('p', '', `演员依据：${names}${mapped ? ` · ${mapped} 位由 MDC-NG 统一身份` : ''}`))
+      }
+      const resourceFactor = visibleFactors.find(factor => factor?.type === 'resource_calibration')
+      if (resourceFactor?.evidence) {
+        const labels = {
+          cracked: '破解', subtitle: '中字', uncensored: '无码', private: '私有源', public: '公开源',
+          multi_provider: '多来源', availability_4plus: '资源充足', provider_avdb: 'AVDB', provider_mteam: 'M-TEAM', provider_javdb: 'JavDB',
+        }
+        const features = (resourceFactor.evidence.features || []).map(value => labels[value] || value).slice(0, 5)
+        const factor = Number(resourceFactor.evidence.factor || 1)
+        if (features.length || Math.abs(factor - 1) >= 0.001) evidence.appendChild(el('p', '', `资源学习：${features.join('、') || '基础可用性'} · 权重 ×${factor.toFixed(2)}`))
+      }
       explanationBox.append(explanationTitle, explanationFactors)
+      if (evidence.childElementCount) explanationBox.appendChild(evidence)
       const buttons = el('div', 'av-rec-card-actions')
       const viewBtn = el('button', '', '详情')
       viewBtn.onclick = () => openDetail(item)

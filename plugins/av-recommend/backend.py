@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 45
-PERSONALIZED_MODEL_VERSION = "personal-v45"
+RECOMMENDATION_ALGORITHM_VERSION = 46
+PERSONALIZED_MODEL_VERSION = "personal-v46"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -3487,7 +3487,16 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     confidence = max(0, min(100, round(raw_confidence * (0.52 + evidence_reliability * 0.48))))
     uncertainty_radius = round(24 * (1 - evidence_reliability))
     factor_rows = [
-        {"type": "actor", "label": "演员偏好", "score": round(actor_preference_score, 1)},
+        {"type": "actor", "label": "演员偏好", "score": round(actor_preference_score, 1), "evidence": [
+            {
+                "name": name,
+                "identity": identity,
+                "library_count": int(actor_counter.get(identity, 0) or 0),
+                "identity_source": "mdc-ng" if str(identity).startswith("mdc-ng:") else "name",
+            }
+            for name, identity in zip(actors, actor_identities)
+            if actor_counter.get(identity, 0) > 0
+        ][:4]},
         {"type": "category", "label": "题材偏好", "score": round(category_preference_score, 1)},
         {"type": "relationship", "label": "作品关系", "score": round(relationship_preference_score, 1), "evidence": list(item.get("neighbor_evidence") or [])[:3]},
         {"type": "semantic", "label": "标题语义", "score": round(semantic_preference_score, 1)},

@@ -108,12 +108,16 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
     assert unaligned is not None and aligned is not None
     assert unaligned["context_mixture"]["penalty"] > aligned["context_mixture"]["penalty"]
     assert aligned["score"] > unaligned["score"]
+    actor_factor = next(row for row in aligned["recommendation_explanation"]["factors"] if row["type"] == "actor")
+    assert actor_factor["evidence"][0]["identity"] == identity
+    assert actor_factor["evidence"][0]["library_count"] == 5
+    assert actor_factor["evidence"][0]["name"] == backend.canonical_actor_name("吉泽明步")
 
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 45
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v45"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 46
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v46"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
