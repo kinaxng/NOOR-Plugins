@@ -109,10 +109,10 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
     assert aligned["score"] > unaligned["score"]
 
 
-def test_v30_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
+def test_v31_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 30
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v30"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 31
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v31"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -132,7 +132,58 @@ def test_v30_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypat
 
     monkeypatch.setattr(backend, "_now_ms", lambda: now)
     recorded = {"exposures": {}, "exposure_batches": []}
-    item = {"code": "AAA-010", "rank": 3, "model_version": "v30", "score": 10}
+    item = {"code": "AAA-010", "rank": 3, "model_version": "v31", "score": 10}
     assert backend._record_exposure_batch(recorded, "batch:1", [item]) == 1
     assert backend._record_exposure_batch(recorded, "batch:1", [item]) == 0
     assert recorded["exposures"]["AAA-010"]["impression_history"] == [{"at": now, "rank": 3, "batch_id": "batch:1"}]
+
+
+def test_v31_shadow_ranking_compares_same_pool_and_records_both_models(monkeypatch) -> None:
+    backend = _backend()
+    items = [
+        {"code": "AAA-001", "score": 20, "ranking_scores": {backend.PERSONALIZED_MODEL_VERSION: 30, backend.STABLE_MODEL_VERSION: 10}},
+        {"code": "AAA-002", "score": 20, "ranking_scores": {backend.PERSONALIZED_MODEL_VERSION: 10, backend.STABLE_MODEL_VERSION: 30}},
+    ]
+    ranks = backend._shadow_rank_map(items)
+    assert ranks["AAA-001"][backend.PERSONALIZED_MODEL_VERSION] == 1
+    assert ranks["AAA-001"][backend.STABLE_MODEL_VERSION] == 2
+    assert ranks["AAA-002"][backend.PERSONALIZED_MODEL_VERSION] == 2
+    assert ranks["AAA-002"][backend.STABLE_MODEL_VERSION] == 1
+
+    monkeypatch.setattr(backend, "_now_ms", lambda: 1_800_000_000_000)
+    store = {"exposures": {}, "exposure_batches": []}
+    assert backend._record_exposure_batch(store, "shadow:1", [{
+        "code": "AAA-001", "rank": 1, "model_version": backend.PERSONALIZED_MODEL_VERSION,
+        "score": 30, "shadow_ranks": ranks["AAA-001"],
+    }]) == 1
+    shadow_models = store["exposures"]["AAA-001"]["shadow_models"]
+    assert shadow_models[backend.PERSONALIZED_MODEL_VERSION]["last_rank"] == 1
+    assert shadow_models[backend.STABLE_MODEL_VERSION]["last_rank"] == 2
+
+
+def test_v31_shadow_evaluation_promotes_only_with_confident_shared_outcomes() -> None:
+    backend = _backend()
+
+    def store(personal_rank: int, stable_rank: int, count: int) -> dict:
+        return {"exposures": {
+            f"AAA-{index:03d}": {
+                "conversion_value": 1.0,
+                "shadow_models": {
+                    backend.PERSONALIZED_MODEL_VERSION: {"last_rank": personal_rank},
+                    backend.STABLE_MODEL_VERSION: {"last_rank": stable_rank},
+                },
+            }
+            for index in range(count)
+        }}
+
+    assert backend._shadow_model_evaluation(store(1, 10, 10))["recommended_policy"] == "collecting"
+    personal = backend._shadow_model_evaluation(store(1, 10, 20))
+    stable = backend._shadow_model_evaluation(store(10, 1, 20))
+    assert personal["recommended_policy"] == "personal"
+    assert stable["recommended_policy"] == "stable"
+    assert backend._select_ranking_model({}, store(10, 1, 20))["version"] == backend.STABLE_MODEL_VERSION
+
+
+def test_mdc_ng_actor_aliases_share_one_recommendation_identity() -> None:
+    backend = _backend()
+    assert backend.actor_identity_key("吉泽明步") == backend.actor_identity_key("吉沢明歩")

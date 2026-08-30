@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 30
-PERSONALIZED_MODEL_VERSION = "personal-v30"
+RECOMMENDATION_ALGORITHM_VERSION = 31
+PERSONALIZED_MODEL_VERSION = "personal-v31"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -1082,6 +1082,22 @@ def _record_exposure_batch(store: dict[str, Any], batch_id: str, items: list[dic
             "score_sum": round(float(model.get("score_sum") or 0) + score_value, 3),
         })
         models[model_version] = model
+        shadow_models = row.setdefault("shadow_models", {})
+        raw_shadow_ranks = item.get("shadow_ranks") if isinstance(item.get("shadow_ranks"), dict) else {}
+        for shadow_version, shadow_rank_value in list(raw_shadow_ranks.items())[:4]:
+            shadow_version = str(shadow_version or "")[:64]
+            shadow_rank = max(0, int(shadow_rank_value or 0))
+            if not shadow_version or shadow_rank <= 0:
+                continue
+            evidence = shadow_models.get(shadow_version) if isinstance(shadow_models.get(shadow_version), dict) else {}
+            evidence.update({
+                "batch_count": int(evidence.get("batch_count") or 0) + 1,
+                "first_seen_at": int(evidence.get("first_seen_at") or now),
+                "last_seen_at": now,
+                "last_rank": shadow_rank,
+                "best_rank": min([value for value in (int(evidence.get("best_rank") or 0), shadow_rank) if value > 0] or [0]),
+            })
+            shadow_models[shadow_version] = evidence
         row["last_model"] = model_version
         row["last_rank"] = rank
         exposures[code] = row
@@ -1140,6 +1156,82 @@ def _model_evaluation(store: dict[str, Any]) -> dict[str, Any]:
             "mrr": round(float(metric.pop("reciprocal_rank_sum")) / max(converted, 1), 4),
         })
     return {"models": models, "minimum_comparison_sample": 30, "generated_at": _now_ms()}
+
+
+def _shadow_model_evaluation(store: dict[str, Any]) -> dict[str, Any]:
+    versions = (PERSONALIZED_MODEL_VERSION, STABLE_MODEL_VERSION)
+    metrics = {
+        version: {"shared_exposures": 0, "qualified": 0, "verified": 0, "top10": 0, "discounted_gain": 0.0, "reciprocal_rank_sum": 0.0, "rank_sum": 0}
+        for version in versions
+    }
+    paired_exposures = paired_qualified = personal_wins = stable_wins = ties = 0
+    for row in (store.get("exposures") or {}).values():
+        if not isinstance(row, dict):
+            continue
+        shadow_models = row.get("shadow_models") if isinstance(row.get("shadow_models"), dict) else {}
+        evidence = {version: shadow_models.get(version) for version in versions}
+        if not all(isinstance(evidence.get(version), dict) and int((evidence[version] or {}).get("last_rank") or 0) > 0 for version in versions):
+            continue
+        paired_exposures += 1
+        value = _conversion_value(row)
+        qualified = value >= QUALIFIED_CONVERSION_THRESHOLD
+        verified = value >= VERIFIED_CONVERSION_THRESHOLD
+        ranks = {version: int((evidence[version] or {}).get("last_rank") or 0) for version in versions}
+        for version in versions:
+            rank = ranks[version]
+            metric = metrics[version]
+            metric["shared_exposures"] += 1
+            metric["rank_sum"] += rank
+            metric["qualified"] += int(qualified)
+            metric["verified"] += int(verified)
+            metric["top10"] += int(qualified and rank <= 10)
+            metric["discounted_gain"] += value / math.log2(rank + 1) if rank > 0 else 0.0
+            metric["reciprocal_rank_sum"] += 1 / rank if qualified and rank > 0 else 0.0
+        if qualified:
+            paired_qualified += 1
+            if ranks[PERSONALIZED_MODEL_VERSION] < ranks[STABLE_MODEL_VERSION]:
+                personal_wins += 1
+            elif ranks[STABLE_MODEL_VERSION] < ranks[PERSONALIZED_MODEL_VERSION]:
+                stable_wins += 1
+            else:
+                ties += 1
+    for metric in metrics.values():
+        exposed = int(metric["shared_exposures"])
+        qualified = int(metric["qualified"])
+        metric["average_rank"] = round(int(metric.pop("rank_sum")) / max(exposed, 1), 2)
+        metric["gain_per_exposure"] = round(float(metric["discounted_gain"]) / max(exposed, 1), 5)
+        metric["top10_rate"] = round(int(metric["top10"]) / max(qualified, 1), 4)
+        metric["mrr"] = round(float(metric.pop("reciprocal_rank_sum")) / max(qualified, 1), 4)
+        metric["discounted_gain"] = round(float(metric["discounted_gain"]), 4)
+    decisive = personal_wins + stable_wins
+    personal_interval = _wilson_interval(personal_wins, decisive)
+    stable_interval = _wilson_interval(stable_wins, decisive)
+    personal_gain = float(metrics[PERSONALIZED_MODEL_VERSION]["gain_per_exposure"])
+    stable_gain = float(metrics[STABLE_MODEL_VERSION]["gain_per_exposure"])
+    recommended_policy = "collecting"
+    reason = "至少需要 20 个共享转化和 12 个非平局样本"
+    if paired_qualified >= 20 and decisive >= 12:
+        if personal_interval[0] > 0.5 and personal_gain > stable_gain * 1.03:
+            recommended_policy, reason = "personal", "个性化影子排名在共享转化上显著优于稳定基线"
+        elif stable_interval[0] > 0.5 and stable_gain > personal_gain * 1.03:
+            recommended_policy, reason = "stable", "稳定基线影子排名在共享转化上显著优于个性化模型"
+        else:
+            recommended_policy, reason = "inconclusive", "共享转化尚未形成显著胜负"
+    return {
+        "models": metrics,
+        "paired_exposures": paired_exposures,
+        "paired_qualified": paired_qualified,
+        "decisive": decisive,
+        "wins": {"personal": personal_wins, "stable": stable_wins, "ties": ties},
+        "win_intervals": {
+            "personal": {"lower": round(personal_interval[0], 4), "upper": round(personal_interval[1], 4)},
+            "stable": {"lower": round(stable_interval[0], 4), "upper": round(stable_interval[1], 4)},
+        },
+        "recommended_policy": recommended_policy,
+        "reason": reason,
+        "minimum_qualified_sample": 20,
+        "minimum_decisive_sample": 12,
+    }
 
 
 def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
@@ -1363,6 +1455,11 @@ def _select_ranking_model(config: dict[str, Any], store: dict[str, Any]) -> dict
         stable_lower = float((stable.get("conversion_interval") or {}).get("lower") or 0)
         if personal_upper < stable_lower:
             return {"policy": "stable", "version": STABLE_MODEL_VERSION, "mode": "auto", "reason": "稳定模型转化区间显著更优"}
+    shadow = _shadow_model_evaluation(store)
+    if shadow.get("recommended_policy") == "stable":
+        return {"policy": "stable", "version": STABLE_MODEL_VERSION, "mode": "auto", "reason": str(shadow.get("reason") or "影子评估推荐稳定模型")}
+    if shadow.get("recommended_policy") == "personal":
+        return {"policy": "personal", "version": PERSONALIZED_MODEL_VERSION, "mode": "auto", "reason": str(shadow.get("reason") or "影子评估推荐个性化模型")}
     return {"policy": "personal", "version": PERSONALIZED_MODEL_VERSION, "mode": "auto", "reason": "个性化模型处于安全区间"}
 
 
@@ -2895,8 +2992,10 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         score += 10
         reasons.insert(0, "洗版：" + " / ".join(improved[:3]))
 
+    policy_adjustment = relationship_preference_score * 0.45 + semantic_preference_score * 0.3 + outcome_calibration_score
+    personal_ranking_score = score
+    stable_ranking_score = score - policy_adjustment
     if str(config.get("_ranking_policy") or "personal") == "stable":
-        policy_adjustment = relationship_preference_score * 0.45 + semantic_preference_score * 0.3 + outcome_calibration_score
         score -= policy_adjustment
         personalized_score -= policy_adjustment
         relationship_preference_score *= 0.55
@@ -2955,6 +3054,10 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "series": series,
         "director": director,
         "score": score,
+        "ranking_scores": {
+            PERSONALIZED_MODEL_VERSION: max(0, min(92, round(personal_ranking_score))),
+            STABLE_MODEL_VERSION: max(0, min(92, round(stable_ranking_score))),
+        },
         "personalized_score": round(personalized_score, 1),
         "actionability_score": round(actionability_score, 1),
         "quality_score": round(quality_score, 1),
@@ -3166,6 +3269,11 @@ async def _enrich_recommendation_resources(
             explanation["factors"] = sorted(factors, key=lambda row: abs(float(row.get("score") or 0)), reverse=True)
         cap = 100 if float(item.get("personalized_score") or 0) >= 22 else 82
         item["score"] = max(0, min(cap, int(round(float(item.get("score") or 0) + score_boost))))
+        if isinstance(item.get("ranking_scores"), dict):
+            item["ranking_scores"] = {
+                version: max(0, min(cap, int(round(float(value or 0) + score_boost))))
+                for version, value in item["ranking_scores"].items()
+            }
         item["reasons"] = list(dict.fromkeys(item.get("reasons") or []))[:6]
 
     tasks = [asyncio.create_task(enrich_one(item)) for item in targets]
@@ -3286,6 +3394,27 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
         if series:
             series_seen[series] += 1
     return selected
+
+
+def _shadow_rank_map(items: list[dict[str, Any]], versions: tuple[str, ...] = (PERSONALIZED_MODEL_VERSION, STABLE_MODEL_VERSION)) -> dict[str, dict[str, int]]:
+    """Rank the same scored pool under both policies without extra provider work."""
+    result: dict[str, dict[str, int]] = {}
+    for version in versions:
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            ranking_scores = item.get("ranking_scores") if isinstance(item.get("ranking_scores"), dict) else {}
+            shadow = dict(item)
+            shadow["score"] = float(ranking_scores.get(version) if ranking_scores.get(version) is not None else item.get("score") or 0)
+            shadow["personalized_score"] = shadow["score"]
+            rows.append(shadow)
+        rows.sort(key=lambda row: (float(row.get("score") or 0), row.get("magnets_count") or 0, row.get("release_date") or ""), reverse=True)
+        window = min(len(rows), max(160, 4 * 60))
+        ranked = _diversify_recommendations(rows[:window]) + rows[window:]
+        for rank, item in enumerate(ranked, 1):
+            code = _norm_code(item.get("code"))
+            if code:
+                result.setdefault(code, {})[version] = rank
+    return result
 
 
 def _recommendation_diversity_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3687,6 +3816,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     if resource_warnings:
         warnings.extend(resource_warnings)
     scored.sort(key=lambda x: (x["score"], (x.get("resource_summary") or {}).get("total") or 0, x.get("magnets_count") or 0, x.get("release_date") or ""), reverse=True)
+    shadow_ranks = await asyncio.to_thread(_shadow_rank_map, scored)
     # Full mode can contain thousands of candidates. Diversifying all of them
     # is O(n²), while only a bounded head can reach this response or its
     # exploration pool. Preserve the scored tail without blocking the loop.
@@ -3710,6 +3840,8 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     for rank, item in enumerate(scored, 1):
         item["recommendation_rank"] = rank
         item["model_version"] = model_selection["version"]
+        item["shadow_ranks"] = dict(shadow_ranks.get(_norm_code(item.get("code"))) or {})
+        item["shadow_ranks"][model_selection["version"]] = rank
     # Diversification can promote candidates that were outside the first-pass
     # window. Confirm the cards that will actually be displayed as a second
     # pass, skipping rows already enriched above.
@@ -3754,6 +3886,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "disliked": len([x for x in feedback["disliked_codes"] if x]),
             "cold_start": {"active": cold_start_strength > 0, "strength": round(cold_start_strength, 3), "threshold": cold_start_threshold},
             "model_evaluation": _model_evaluation(store),
+            "shadow_evaluation": _shadow_model_evaluation(store),
             "route_evaluation": route_evaluation,
             "exploration_evaluation": exploration_evaluation,
             "topic_evaluation": topic_evaluation,
@@ -3951,7 +4084,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         return {"ok": True, "recorded": recorded}
     if action == "model_evaluation":
         data = _ensure_store()
-        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data), "route_evaluation": _route_evaluation(data), "exploration_evaluation": _exploration_evaluation(data)}
+        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data), "shadow_evaluation": _shadow_model_evaluation(data), "route_evaluation": _route_evaluation(data), "exploration_evaluation": _exploration_evaluation(data)}
     if action == "model_policy":
         policy = str(payload.get("policy") or "auto").strip().lower()
         if policy not in {"auto", "personal", "stable"}:
@@ -3964,7 +4097,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         _save_store(data)
         _invalidate_recommendation_cache()
         asyncio.create_task(_prewarm_recommendations(config, force=True, include_full=False))
-        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data)}
+        return {"ok": True, "selection": _select_ranking_model(config, data), "evaluation": _model_evaluation(data), "shadow_evaluation": _shadow_model_evaluation(data)}
     if action == "reset_feedback":
         data = _ensure_store()
         data["ignored"] = []

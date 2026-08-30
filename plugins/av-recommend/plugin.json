@@ -1,7 +1,7 @@
 {
   "id": "av-recommend",
   "name": "推荐中心",
-  "version": "1.21.0",
+  "version": "1.22.0",
   "description": "基于媒体库偏好、JavDB 候选、完整候选池与资源可用性的推荐中心。",
   "type": "knowledge_app",
   "tags": ["official", "recommendation", "knowledge", "javdb"],
@@ -31,7 +31,7 @@
     "minimum_confidence_threshold": {"type": "number", "label": "最低置信度", "description": "过滤置信度低于该值的候选，0 到 80。", "default": 0, "min": 0, "max": 80, "step": 5},
     "adaptive_cold_start_enabled": {"type": "boolean", "label": "自适应冷启动", "description": "媒体库样本不足时自动混入少量高可用、多题材候选，并随画像成熟逐步退出。", "default": true},
     "cold_start_min_library_size": {"type": "number", "label": "冷启动样本门槛", "description": "媒体库达到该作品数量后完全使用个性化模型。", "default": 20, "min": 5, "max": 100, "step": 5},
-    "ranking_model_policy": {"type": "select", "label": "推荐模型策略", "description": "自动模式会根据真实曝光转化的置信区间保护性回退。", "default": "auto", "options": [{"label": "自动保护", "value": "auto"}, {"label": "个性化模型", "value": "personal"}, {"label": "稳定模型", "value": "stable"}]}
+    "ranking_model_policy": {"type": "select", "label": "推荐模型策略", "description": "自动模式会根据真实曝光转化和共享候选影子评估保护性切换。", "default": "auto", "options": [{"label": "自动保护", "value": "auto"}, {"label": "个性化模型", "value": "personal"}, {"label": "稳定模型", "value": "stable"}]}
   },
   "default_config": {
     "candidate_limit": 48,
