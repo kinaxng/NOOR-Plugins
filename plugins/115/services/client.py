@@ -116,8 +116,9 @@ class Client115:
             value = value[0] if value else {}
         return normalize_file_info(value if isinstance(value, dict) else {})
 
-    async def download_url(self, pick_code: str) -> dict[str, Any]:
-        value = await self.request("POST", "/open/ufile/downurl", data={"pick_code": pick_code}, headers={"User-Agent": self.user_agent})
+    async def download_url(self, pick_code: str, *, user_agent: str = "") -> dict[str, Any]:
+        effective_user_agent = str(user_agent or self.user_agent)[:512]
+        value = await self.request("POST", "/open/ufile/downurl", data={"pick_code": pick_code}, headers={"User-Agent": effective_user_agent})
         if not isinstance(value, dict) or not value:
             raise Error115(0, "115 did not return a download URL")
         item = next(iter(value.values()))
@@ -150,4 +151,3 @@ def normalize_file_info(item: dict[str, Any]) -> dict[str, Any]:
         "pick_code": str(item.get("pick_code") or ""),
         "paths": list(item.get("paths") or []),
     }
-

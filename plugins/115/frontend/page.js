@@ -18,6 +18,7 @@ export async function mount(root, sdk) {
     onChange: key => {
       page.querySelectorAll('[data-panel]').forEach(node => { node.hidden = node.dataset.panel !== key })
       if (key === 'tasks') loadTasks()
+      if (key === 'media') loadMedia()
     },
   }) : document.createElement('div')
   const actions = document.createElement('div')
@@ -133,6 +134,20 @@ export async function mount(root, sdk) {
       taskPanel.innerHTML = `<div class="noor-plugin-115-task-list">${items.map(item => `<article><div><strong>${item.name || item.source_hint || '115 离线任务'}</strong><span>${item.source_kind} · 目录 ${item.target_directory_id}</span></div><em class="is-${item.status}">${item.status}</em><b>${item.progress || 0}%</b><small>${item.created_at || ''}</small></article>`).join('')}</div>`
     } catch (error) {
       taskPanel.innerHTML = `<div class="noor-plugin-115-empty"><strong>离线任务读取失败</strong><span>${error?.response?.data?.detail || error?.message || ''}</span></div>`
+    }
+  }
+
+  async function loadMedia() {
+    try {
+      const response = await sdk.api.post('/plugins/115/actions/media', { payload: { limit: 200 } })
+      const items = (response?.data || response)?.items || []
+      if (!items.length) {
+        mediaPanel.innerHTML = '<div class="noor-plugin-115-empty"><strong>媒体流水线尚未产生记录</strong><span>只处理新完成任务中的媒体，不扫描整个网盘。</span></div>'
+        return
+      }
+      mediaPanel.innerHTML = `<div class="noor-plugin-115-task-list">${items.map(item => `<article><div><strong>${item.name || item.file_id}</strong><span>${item.file_id} · ${fmtBytes(item.size)}</span></div><em class="is-${item.strm_status}">STRM ${item.strm_status}</em><b>${item.mediainfo_status}</b><small>${item.path || ''}</small></article>`).join('')}</div>`
+    } catch (error) {
+      mediaPanel.innerHTML = `<div class="noor-plugin-115-empty"><strong>媒体记录读取失败</strong><span>${error?.response?.data?.detail || error?.message || ''}</span></div>`
     }
   }
 

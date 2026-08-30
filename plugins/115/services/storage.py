@@ -4,7 +4,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, Integer, JSON, String, Text, create_engine, select
+from sqlalchemy import Boolean, DateTime, Integer, JSON, String, Text, create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.core.runtime_paths import plugin_data_path
@@ -34,9 +34,46 @@ class OfflineTask(Base):
     noor_job_id: Mapped[str] = mapped_column(String(36), default="", index=True)
     context: Mapped[dict] = mapped_column(JSON, default=dict)
     detected_file_ids: Mapped[list] = mapped_column(JSON, default=list)
+    result_file_id: Mapped[str] = mapped_column(String(64), default="")
+    pipeline_status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class MediaFile(Base):
+    __tablename__ = "cloud115_media_files"
+
+    file_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    sha1: Mapped[str] = mapped_column(String(64), default="", index=True)
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    name: Mapped[str] = mapped_column(String(512))
+    parent_id: Mapped[str] = mapped_column(String(64), default="")
+    display_path: Mapped[str] = mapped_column(Text, default="")
+    pick_code: Mapped[str] = mapped_column(String(128), default="")
+    updated_at_remote: Mapped[int] = mapped_column(Integer, default=0)
+    source_task_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class StrmRecord(Base):
+    __tablename__ = "cloud115_strm_records"
+
+    file_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    local_path: Mapped[str] = mapped_column(Text, unique=True)
+    status: Mapped[str] = mapped_column(String(32), default="created")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ServiceToken(Base):
+    __tablename__ = "cloud115_service_tokens"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(64), default="stream")
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 _db_path = plugin_data_path("115", "state.db")
@@ -47,6 +84,12 @@ Session = sessionmaker(bind=_engine, expire_on_commit=False)
 
 def init_storage() -> None:
     Base.metadata.create_all(_engine)
+    with _engine.begin() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("cloud115_offline_tasks")}
+        if "result_file_id" not in columns:
+            connection.execute(text("ALTER TABLE cloud115_offline_tasks ADD COLUMN result_file_id VARCHAR(64) DEFAULT ''"))
+        if "pipeline_status" not in columns:
+            connection.execute(text("ALTER TABLE cloud115_offline_tasks ADD COLUMN pipeline_status VARCHAR(32) DEFAULT 'pending'"))
 
 
 def source_identity(url: str) -> tuple[str, str, str]:
@@ -117,7 +160,95 @@ def task_dict(task: OfflineTask) -> dict[str, Any]:
         "source_hint": task.source_hint, "name": task.name, "target_directory_id": task.target_directory_id,
         "status": task.status, "progress": task.progress, "error": task.error_message,
         "noor_job_id": task.noor_job_id, "detected_file_ids": list(task.detected_file_ids or []),
+        "result_file_id": task.result_file_id,
+        "pipeline_status": task.pipeline_status,
         "created_at": task.created_at.isoformat() if task.created_at else "",
         "updated_at": task.updated_at.isoformat() if task.updated_at else "",
         "completed_at": task.completed_at.isoformat() if task.completed_at else "",
+    }
+
+
+def upsert_media(item: dict[str, Any], *, task_id: str, display_path: str = "") -> tuple[MediaFile, bool]:
+    init_storage()
+    file_id = str(item.get("file_id") or "")
+    if not file_id:
+        raise ValueError("115 media is missing file_id")
+    with Session.begin() as session:
+        media = session.get(MediaFile, file_id)
+        created = media is None
+        if media is None:
+            media = MediaFile(file_id=file_id, name=str(item.get("name") or ""))
+            session.add(media)
+        media.sha1 = str(item.get("sha1") or "").upper()
+        media.size = int(item.get("size") or 0)
+        media.name = str(item.get("name") or media.name)
+        media.parent_id = str(item.get("parent_id") or "")
+        media.display_path = display_path or media.display_path
+        media.pick_code = str(item.get("pick_code") or media.pick_code)
+        media.updated_at_remote = int(item.get("updated_at") or 0)
+        media.source_task_id = task_id or media.source_task_id
+        media.updated_at = utcnow()
+        session.flush()
+        return media, created
+
+
+def get_media(file_id: str) -> MediaFile | None:
+    init_storage()
+    with Session() as session:
+        return session.get(MediaFile, str(file_id))
+
+
+def list_media(limit: int = 200) -> list[MediaFile]:
+    init_storage()
+    with Session() as session:
+        return list(session.scalars(select(MediaFile).order_by(MediaFile.created_at.desc()).limit(max(1, min(limit, 1000)))).all())
+
+
+def save_strm(file_id: str, local_path: str) -> StrmRecord:
+    init_storage()
+    with Session.begin() as session:
+        record = session.get(StrmRecord, file_id)
+        if record is None:
+            record = StrmRecord(file_id=file_id, local_path=local_path)
+            session.add(record)
+        else:
+            record.local_path = local_path
+            record.status = "created"
+            record.updated_at = utcnow()
+        return record
+
+
+def get_strm(file_id: str) -> StrmRecord | None:
+    init_storage()
+    with Session() as session:
+        return session.get(StrmRecord, str(file_id))
+
+
+def register_service_token(token_hash: str) -> None:
+    init_storage()
+    with Session.begin() as session:
+        if session.get(ServiceToken, token_hash) is None:
+            session.add(ServiceToken(token_hash=token_hash))
+
+
+def service_token_valid(token_hash: str) -> bool:
+    init_storage()
+    with Session() as session:
+        token = session.get(ServiceToken, token_hash)
+        return bool(token and token.scope == "stream" and not token.revoked)
+
+
+def media_dict(media: MediaFile) -> dict[str, Any]:
+    record = get_strm(media.file_id)
+    return {
+        "file_id": media.file_id,
+        "sha1": media.sha1,
+        "size": media.size,
+        "name": media.name,
+        "parent_id": media.parent_id,
+        "path": media.display_path,
+        "strm_status": record.status if record else "pending",
+        "strm_path": record.local_path if record else "",
+        "mediainfo_status": "pending",
+        "emby_status": "pending",
     }

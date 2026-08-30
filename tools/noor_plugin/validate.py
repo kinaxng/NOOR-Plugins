@@ -35,6 +35,7 @@ KNOWN_CAPABILITIES = {
     "rss_fetch",
     "sidebar_widget",
     "sidebar_page",
+    "stream_resolver",
     "subtitle_search",
     "subtitle_search_local",
     "subscription_core",
