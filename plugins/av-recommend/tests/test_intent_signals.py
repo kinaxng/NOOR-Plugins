@@ -167,7 +167,7 @@ def test_topic_match_requires_the_labeled_anchor_and_relation() -> None:
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 62
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 63
     assert backend.RANKING_POLICY_VERSION == 57
     assert backend.PERSONALIZED_MODEL_VERSION == "personal-v57"
     hour = 3_600_000
@@ -326,7 +326,13 @@ def test_resource_timeout_schedules_queue_write_without_waiting(monkeypatch) -> 
     release_enqueue = asyncio.Event()
 
     async def slow_search(*_args, **_kwargs):
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Simulate a database/driver call that takes time to unwind after
+            # cancellation. The HTTP budget must not wait for this cleanup.
+            await asyncio.sleep(0.4)
+            raise
 
     async def slow_enqueue(_codes, *, priority):
         assert priority == 20
@@ -338,12 +344,15 @@ def test_resource_timeout_schedules_queue_write_without_waiting(monkeypatch) -> 
     monkeypatch.setattr(intelligence, "enqueue_resource_refresh", slow_enqueue)
 
     async def scenario() -> None:
+        started = asyncio.get_running_loop().time()
         warnings = await backend._enrich_recommendation_resources(
             {"resource_enrich_limit": 1, "resource_enrich_budget_seconds": 1},
             [{"code": "AAA-001"}],
         )
+        elapsed = asyncio.get_running_loop().time() - started
         await asyncio.wait_for(enqueue_started.wait(), timeout=0.1)
         assert warnings == ["正在后台补全 1 部作品的资源情报"]
+        assert elapsed < 1.25
         assert backend._resource_enqueue_tasks
         release_enqueue.set()
         await asyncio.gather(*list(backend._resource_enqueue_tasks))

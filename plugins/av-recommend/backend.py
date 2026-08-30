@@ -46,7 +46,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 62
+RECOMMENDATION_ALGORITHM_VERSION = 63
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
 RANKING_POLICY_VERSION = 57
@@ -670,6 +670,11 @@ def _parse_datetime(value: Any) -> dt.datetime | None:
     except ValueError:
         return None
     return parsed.replace(tzinfo=dt.timezone.utc) if parsed.tzinfo is None else parsed.astimezone(dt.timezone.utc)
+
+
+def _consume_background_task(task: asyncio.Task[Any]) -> None:
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        task.result()
 
 
 def _norm_code(value: Any) -> str:
@@ -3835,7 +3840,7 @@ async def _enrich_recommendation_resources(
         pending_codes = [str(targets[index].get("code") or "") for index, task in enumerate(tasks) if task in pending]
         for task in pending:
             task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+            task.add_done_callback(_consume_background_task)
         async def enqueue_later() -> None:
             try:
                 from app.knowledge.intelligence import enqueue_resource_refresh
