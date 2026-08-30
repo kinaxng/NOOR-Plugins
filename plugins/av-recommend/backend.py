@@ -46,7 +46,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 67
+RECOMMENDATION_ALGORITHM_VERSION = 68
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
 RANKING_POLICY_VERSION = 57
@@ -4779,7 +4779,12 @@ async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> d
                 int(snapshot.get("algorithm_version") or 0) == RECOMMENDATION_ALGORITHM_VERSION
                 and snapshot_model in {PERSONALIZED_MODEL_VERSION, STABLE_MODEL_VERSION}
             )
-            if current_snapshot:
+            legacy_inflight_fallback = (
+                not snapshot.get("algorithm_version")
+                and not snapshot_model
+                and lock.locked()
+            )
+            if current_snapshot or legacy_inflight_fallback:
                 if snapshot.get("cache_status", {}).get("status") == "stale":
                     _schedule_recommendation_refresh(config, payload, f"mode-snapshot:{source_mode}:{requested_limit}")
                 return snapshot
