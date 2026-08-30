@@ -112,8 +112,8 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 42
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v42"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 43
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v43"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -294,6 +294,34 @@ def test_v42_explicit_refresh_coalesces_with_inflight_generation(monkeypatch) ->
     assert calls == 1
     assert first["algorithm_version"] == backend.RECOMMENDATION_ALGORITHM_VERSION
     assert second["cache_status"]["status"] == "coalesced"
+
+
+def test_v42_library_profile_reuses_matching_core_revision(monkeypatch) -> None:
+    backend = _backend()
+    expected = {"media_count": 7, "codes": {"AAA-001"}}
+    backend._library_profile_cache = {"temporal": {"revision": "revision-a", "value": expected}}
+
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def fake_revision(_db, _policy):
+        return "revision-a"
+
+    async def should_not_scan(_db):
+        raise AssertionError("matching profile revision must skip the expensive Emby scan")
+
+    monkeypatch.setattr(backend, "async_session_maker", lambda: SessionContext())
+    monkeypatch.setattr(backend, "_library_profile_revision", fake_revision)
+    monkeypatch.setattr(backend, "_emby_cache_codes", should_not_scan)
+    assert asyncio.run(backend._library_profile()) is expected
+
+    backend._library_profile_cache["temporal"]["expires_at"] = backend.time.monotonic() + 60
+    monkeypatch.setattr(backend, "async_session_maker", lambda: (_ for _ in ()).throw(AssertionError("hot profile must not open the database")))
+    assert asyncio.run(backend._library_profile()) is expected
 
 
 def test_coverage_repair_queue_is_bounded_actionable_and_cooled_down(monkeypatch) -> None:

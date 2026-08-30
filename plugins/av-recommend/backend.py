@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import async_session_maker
@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 42
-PERSONALIZED_MODEL_VERSION = "personal-v42"
+RECOMMENDATION_ALGORITHM_VERSION = 43
+PERSONALIZED_MODEL_VERSION = "personal-v43"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -83,6 +83,7 @@ _profile_enrichment_pending: dict[str, dict[str, Any]] = {}
 _profile_enrichment_attempts: dict[str, float] = {}
 _profile_enrichment_state: dict[str, Any] = {"status": "idle", "queued": 0, "enriched": 0, "failed": 0, "coverage_queued": 0, "coverage_enriched": 0, "coverage_failed": 0, "coverage_last_queued_at": 0.0, "last_finished_at": None, "last_error": ""}
 _title_profile_refresh_task: asyncio.Task[None] | None = None
+_library_profile_cache: dict[str, dict[str, Any]] = {}
 
 
 def _recommendation_cache_id(cache_key: str) -> str:
@@ -2033,6 +2034,22 @@ def _build_title_profile(media: list[KnowledgeEntity], media_weights: dict[str, 
     return {"title_traits": title_traits, "title_terms": _prune_title_term_counter(title_terms)}
 
 
+async def _library_profile_revision(db: Any, weight_policy: str) -> str:
+    """Cheap revision for the expensive library portrait aggregation."""
+    try:
+        media_count, media_latest = (await db.execute(
+            select(func.count(KnowledgeEntity.id), func.max(KnowledgeEntity.updated_at))
+            .where(KnowledgeEntity.entity_type == "media_item")
+        )).one()
+    except SQLAlchemyError:
+        return ""
+    graph_revision = str(work_similarity_status().get("revision") or "")
+    temporal_bucket = dt.datetime.now(dt.timezone.utc).date().isoformat() if weight_policy == "temporal" else "durable"
+    return hashlib.sha256(
+        f"{id(async_session_maker)}:{weight_policy}:{media_count}:{media_latest}:{graph_revision}:{actor_alias_revision()}:{temporal_bucket}".encode()
+    ).hexdigest()[:24]
+
+
 async def _library_profile(*, weight_policy: str = "temporal") -> dict[str, Any]:
     empty_profile = {
         "media_count": 0,
@@ -2055,7 +2072,15 @@ async def _library_profile(*, weight_policy: str = "temporal") -> dict[str, Any]
         "local_features": {},
         "top_media": [],
     }
+    hot_profile = _library_profile_cache.get(weight_policy)
+    if hot_profile and time.monotonic() < float(hot_profile.get("expires_at") or 0):
+        return hot_profile["value"]
     async with async_session_maker() as db:
+        profile_revision = await _library_profile_revision(db, weight_policy)
+        cached_profile = _library_profile_cache.get(weight_policy)
+        if profile_revision and cached_profile and cached_profile.get("revision") == profile_revision:
+            cached_profile["expires_at"] = time.monotonic() + 60
+            return cached_profile["value"]
         cached_codes = await _emby_cache_codes(db)
         empty_profile["codes"].update(cached_codes)
         try:
@@ -2190,6 +2215,13 @@ async def _library_profile(*, weight_policy: str = "temporal") -> dict[str, Any]
                     "has_subtitle": _text_has_subtitle(data),
                     "is_cracked": _detail_has_cracked_signal(data),
                 }
+        if profile_revision:
+            _library_profile_cache[weight_policy] = {
+                "revision": profile_revision,
+                "value": profile,
+                "generated_at": time.time(),
+                "expires_at": time.monotonic() + 60,
+            }
         return profile
 
 
@@ -4181,6 +4213,10 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
 
     scored, filtered_diagnostics = await asyncio.to_thread(score_candidates)
     mark_timing("candidate_scoring")
+    # Intelligence Core already owns durable resource observations. Hydrate
+    # those first so live providers are queried only for genuinely unknown
+    # cards, rather than re-confirming every recommendation on each refresh.
+    await _merge_cached_resource_intelligence({"items": scored})
     # A small first pass lets resource actionability influence ranking without
     # making the initial recommendation request excessively expensive.
     initial_resource_config = {**config, "resource_enrich_limit": 16, "resource_enrich_budget_seconds": 4}
