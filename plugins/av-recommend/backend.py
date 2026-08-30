@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens, work_similarity_status
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 31
-PERSONALIZED_MODEL_VERSION = "personal-v31"
+RECOMMENDATION_ALGORITHM_VERSION = 32
+PERSONALIZED_MODEL_VERSION = "personal-v32"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -3596,6 +3596,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     topic_evaluation = _topic_evaluation(store)
     session_intent = _session_intent_summary(store)
     core_search_intent = search_intent_summary()
+    similarity_status = work_similarity_status()
     context_gate = _contextual_intent_gate(session_intent, core_search_intent)
     search_evaluation = core_search_intent.get("evaluation") or {}
     search_evaluation_summary = {
@@ -3642,6 +3643,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
         "ranking_model": model_selection["version"],
         "actor_alias_revision": actor_alias_revision(),
+        "work_similarity_revision": similarity_status.get("revision"),
         "behavior_revision": behavior.get("revision"),
         "interest_topic_revision": (behavior.get("interest_topics") or {}).get("revision"),
         "config": config,
@@ -3682,6 +3684,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
         "ranking_model": model_selection["version"],
         "actor_alias_revision": actor_alias_revision(),
+        "work_similarity_revision": similarity_status.get("revision"),
         "behavior_revision": behavior.get("revision"),
         "interest_topic_revision": (behavior.get("interest_topics") or {}).get("revision"),
         "config": config,
@@ -3927,6 +3930,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "average_confidence": round(sum(float(item.get("neighbor_confidence") or 0) for item in scored if float(item.get("neighbor_score") or 0) > 0) / max(1, sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0)), 3),
                 "profile_gaps": dict(similarity_meta.get("profile_gaps") or {}),
                 "profile_enrichment_queued": int(similarity_meta.get("profile_enrichment_queued") or 0),
+                "feature_quality": dict(similarity_meta.get("feature_quality") or {}),
             },
         },
         "candidate_meta": {"pool": _candidate_pool_stats(pool)},

@@ -109,10 +109,10 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
     assert aligned["score"] > unaligned["score"]
 
 
-def test_v31_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
+def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 31
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v31"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 32
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v32"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -132,13 +132,13 @@ def test_v31_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypat
 
     monkeypatch.setattr(backend, "_now_ms", lambda: now)
     recorded = {"exposures": {}, "exposure_batches": []}
-    item = {"code": "AAA-010", "rank": 3, "model_version": "v31", "score": 10}
+    item = {"code": "AAA-010", "rank": 3, "model_version": "v32", "score": 10}
     assert backend._record_exposure_batch(recorded, "batch:1", [item]) == 1
     assert backend._record_exposure_batch(recorded, "batch:1", [item]) == 0
     assert recorded["exposures"]["AAA-010"]["impression_history"] == [{"at": now, "rank": 3, "batch_id": "batch:1"}]
 
 
-def test_v31_shadow_ranking_compares_same_pool_and_records_both_models(monkeypatch) -> None:
+def test_v32_shadow_ranking_compares_same_pool_and_records_both_models(monkeypatch) -> None:
     backend = _backend()
     items = [
         {"code": "AAA-001", "score": 20, "ranking_scores": {backend.PERSONALIZED_MODEL_VERSION: 30, backend.STABLE_MODEL_VERSION: 10}},
@@ -161,7 +161,7 @@ def test_v31_shadow_ranking_compares_same_pool_and_records_both_models(monkeypat
     assert shadow_models[backend.STABLE_MODEL_VERSION]["last_rank"] == 2
 
 
-def test_v31_shadow_evaluation_promotes_only_with_confident_shared_outcomes() -> None:
+def test_v32_shadow_evaluation_promotes_only_with_confident_shared_outcomes() -> None:
     backend = _backend()
 
     def store(personal_rank: int, stable_rank: int, count: int) -> dict:

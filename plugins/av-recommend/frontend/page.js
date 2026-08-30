@@ -249,6 +249,8 @@ export async function mount(root, sdk) {
     const contextMixture = stats.context_mixture || {}
     const exposureFatigue = stats.exposure_fatigue || {}
     const shadow = stats.shadow_evaluation || {}
+    const coreRecall = stats.neighbor_recall || {}
+    const coreFeatureQuality = coreRecall.feature_quality || {}
     profile.innerHTML = ''
     const cards = [
       ['媒体库', p.media_count || 0, '已分析作品'],
@@ -258,6 +260,8 @@ export async function mount(root, sdk) {
       ['候选池', fmtPool(stats.candidate_pool_total, stats.candidate_pool_today), state.sourceMode === 'full' ? '完整累计+今日' : '历史累计+今日'],
       ['模型', data.model?.version || '-', data.model?.mode === 'auto' ? '自动保护' : '手动选择'],
       ['影子评估', `${shadow.paired_qualified || 0}/${shadow.minimum_qualified_sample || 20}`, shadow.recommended_policy === 'collecting' ? '共享候选静默采样' : (shadow.reason || '共享候选对照')],
+      ['Core 邻域', coreRecall.selected || 0, `${coreRecall.core_only_selected || 0} 个独立召回`],
+      ['特征净化', (coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0) + (coreFeatureQuality.dropped_code_prefix_categories || 0), `${(coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0)} 演员重复 · ${coreFeatureQuality.dropped_code_prefix_categories || 0} 番号前缀`],
       ['覆盖', actorDiversity.unique || 0, `有效演员 ${actorDiversity.effective || 0}`],
       ['路线学习', `${activeRoutes}/${Object.keys(routes).length}`, `${stats.route_evaluation?.eligible || 0} 个成熟样本`],
       ['主题学习', `${activeTopics}/${Object.keys(topicMetrics).length}`, `${stats.topic_evaluation?.total_exposed || 0} 次主题曝光`],
