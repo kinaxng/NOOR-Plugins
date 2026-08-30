@@ -111,7 +111,7 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 32
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 33
     assert backend.PERSONALIZED_MODEL_VERSION == "personal-v32"
     hour = 3_600_000
     day = 24 * hour

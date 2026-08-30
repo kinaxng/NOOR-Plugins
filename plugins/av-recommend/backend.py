@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens, work_similarity_status
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens, work_similarity_recall_evaluation, work_similarity_status
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -46,7 +46,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 32
+RECOMMENDATION_ALGORITHM_VERSION = 33
 PERSONALIZED_MODEL_VERSION = "personal-v32"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
@@ -3723,6 +3723,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         _save_pool(pool)
     pool_items = pool.get("items") if isinstance(pool.get("items"), dict) else {}
     similarity_meta: dict[str, Any] = {}
+    similarity_evaluation: dict[str, Any] = {}
     if source_mode == "full":
         candidates = [dict(item) for item in pool_items.values() if isinstance(item, dict)]
         warnings: list[str] = []
@@ -3753,6 +3754,13 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             limit=160,
         )
         similarity_meta["seed_sources"] = graph_seed_sources
+        try:
+            similarity_evaluation = await work_similarity_recall_evaluation(
+                set(profile.get("codes") or []),
+                graph_seed_weights,
+            )
+        except Exception as exc:
+            similarity_evaluation = {"error": str(exc), "evaluated": 0}
         by_code = {_candidate_code(item): item for item in candidates if _candidate_code(item)}
         for neighbor in similarity_meta.get("items") or []:
             code = _candidate_code(neighbor)
@@ -3931,6 +3939,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "profile_gaps": dict(similarity_meta.get("profile_gaps") or {}),
                 "profile_enrichment_queued": int(similarity_meta.get("profile_enrichment_queued") or 0),
                 "feature_quality": dict(similarity_meta.get("feature_quality") or {}),
+                "offline_evaluation": similarity_evaluation,
             },
         },
         "candidate_meta": {"pool": _candidate_pool_stats(pool)},
