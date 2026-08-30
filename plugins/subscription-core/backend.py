@@ -927,6 +927,7 @@ async def _create_subscription(config: dict[str, Any], payload: dict[str, Any]) 
             _save(data)
         _schedule_immediate_check(config, existing.get("id", ""))
         await enqueue_resource_refresh([code], priority=5)
+        await _record_core_outcome(existing, "subscription", {"evidence_id": f"{existing.get('id')}:subscription"})
         return {"ok": True, "subscription": _public_subscription(existing), "created": False}
     media_item = await _find_media(code, raw_code)
     sub_type = str(payload.get("type") or "auto")
@@ -978,6 +979,7 @@ async def _create_subscription(config: dict[str, Any], payload: dict[str, Any]) 
     _save(data)
     _schedule_immediate_check(config, sub["id"])
     await enqueue_resource_refresh([code], priority=5)
+    await _record_core_outcome(sub, "subscription", {"evidence_id": f"{sub.get('id')}:subscription"})
     return {"ok": True, "subscription": _public_subscription(sub), "created": True}
 
 

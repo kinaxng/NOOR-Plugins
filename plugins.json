@@ -10,7 +10,7 @@
     {"id":"mdc-ng-manual","name":"MDC-NG 手动任务","version":"0.1.0","description":"向 MDC-NG 提交整理任务并查看结果。","source_dir":"plugins/mdc-ng-manual"},
     {"id":"mteam-plugin","name":"M-Team","version":"0.2.0","description":"M-Team RSS、资源、字幕与下载推送。","source_dir":"plugins/mteam-plugin"},
     {"id":"qbittorrent","name":"qBittorrent","version":"0.3.1","description":"qBittorrent 下载器和任务管理。","source_dir":"plugins/qbittorrent"},
-    {"id":"subscription-core","name":"订阅中心","version":"0.1.0","description":"NOOR 官方订阅与洗版中心。","source_dir":"plugins/subscription-core"},
+    {"id":"subscription-core","name":"订阅中心","version":"0.1.1","description":"NOOR 官方订阅与洗版中心。","source_dir":"plugins/subscription-core"},
     {"id":"transmission","name":"Transmission","version":"0.1.0","description":"Transmission RPC 下载器。","source_dir":"plugins/transmission"},
     {"id":"widget-system","name":"系统监控","version":"0.2.0","description":"CPU、内存、GPU 与显存监控组件。","source_dir":"plugins/widget-system"},
     {"id":"xunlei-remote","name":"迅雷远程","version":"0.1.0","description":"迅雷 NAS 远程下载管理。","source_dir":"plugins/xunlei-remote"},
