@@ -263,41 +263,65 @@ export async function mount(root, sdk) {
     const temporalScales = temporal.scales || {}
     const temporalBacktest = temporal.backtest || {}
     profile.innerHTML = ''
-    const cards = [
-      ['媒体库', p.media_count || 0, '已分析作品'],
-      ['番号', p.code_count || 0, '可识别番号'],
-      ['候选', stats.candidates || 0, '本轮扫描'],
-      ['推荐', data.total || 0, '综合排序'],
-      ['候选池', fmtPool(stats.candidate_pool_total, stats.candidate_pool_today), state.sourceMode === 'full' ? '完整累计+今日' : '历史累计+今日'],
-      ['模型', data.model?.version || '-', data.model?.mode === 'auto' ? '自动保护' : '手动选择'],
-      ['影子评估', `${shadow.paired_qualified || 0}/${shadow.minimum_qualified_sample || 20}`, shadow.recommended_policy === 'collecting' ? '共享候选静默采样' : (shadow.reason || '共享候选对照')],
-      ['资源学习', `${resourceShadow.paired_qualified || 0}/${resourceShadow.minimum_qualified_sample || 20}`, resourceShadow.recommended_policy === 'collecting' ? '固定权重与学习权重静默对照' : (resourceShadow.reason || '资源策略对照')],
-      ['资源校准', resourceOutcome.status === 'active' ? `${resourceOutcome.eligible || 0} 项` : '采集中', resourceOutcome.status === 'active' ? `${Object.values(resourceOutcome.weights || {}).filter(value => Math.abs(Number(value || 1) - 1) >= 0.01).length} 个资源特征已调整` : '达到对照样本后自动启用'],
-      ['Core 邻域', coreRecall.selected || 0, `${coreRecall.core_only_selected || 0} 个独立召回`],
-      ['关系图覆盖', coreRecall.graph_coverage_percent != null ? `${Number(coreRecall.graph_coverage_percent).toFixed(1)}%` : '待构建', `${coreRecall.linked_works || 0}/${coreRecall.unique_works || 0} 个唯一作品 · ${coreRecall.isolated_works || 0} 孤立`],
-      ['画像融合', coreRecall.unique_works || 0, `${coreRecall.source_profiles || 0} 条来源画像 · ${coreRecall.duplicate_profiles || 0} 条重复已融合`],
-      ['离线找回', coreOffline.hit_rate?.['@20'] != null ? `${Math.round(coreOffline.hit_rate['@20'] * 100)}%` : '待评估', coreOffline.evaluated ? `${coreOffline.evaluated} 部留一 · 覆盖 ${Math.round((coreOffline.coverage || 0) * 100)}%` : '留一邻域审计'],
-      ['覆盖修复', `${coverageRepair.enriched || 0}/${coverageRepair.queued || 0}`, `${coreRecall.coverage_repair_queued || 0} 个本轮加入 · ${coverageRepair.failed || 0} 失败`],
-      ['关系校准', Object.keys(relationWeights).length || 0, Object.keys(relationWeights).length ? `${Object.entries(relationWeights).map(([key, value]) => `${key} ${Math.round(value * 100)}%`).join(' · ')} · ${relationPolicy.status === 'confirming' ? `候选确认 ${relationPolicy.confirmations || 0}/${relationPolicy.required_confirmations || 2}` : relationPolicy.status === 'promoted' ? '新策略已晋升' : '稳定策略'}` : '训练/验证暂无一致调整'],
-      ['时间画像', temporalScales.current?.work_count || 0, `${temporalScales.medium?.work_count || 0} 中期 · ${temporalScales.durable?.work_count || 0} 长期`],
-      ['时间回测', temporalBacktest.recommended_policy === 'temporal' ? '近期增益' : temporalBacktest.recommended_policy === 'durable' ? '长期等权' : '采集中', temporalBacktest.evaluated ? `${temporalBacktest.evaluated} 个历史切点 · 验证 ${Math.round((temporalBacktest.utility_delta?.validation || 0) * 10000) / 100}%` : '等待足够历史样本'],
-      ['特征净化', (coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0) + (coreFeatureQuality.dropped_code_prefix_categories || 0) + (coreFeatureQuality.dropped_operational_semantic_terms || 0), `${(coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0)} 演员重复 · ${coreFeatureQuality.dropped_code_prefix_categories || 0} 番号前缀 · ${coreFeatureQuality.dropped_operational_semantic_terms || 0} 技术/来源词`],
-      ['标题补演员', coreFeatureQuality.title_inferred_actor_features || 0, `MDC-NG 低权重补全 · ${coreRecall.featureless_works || 0} 个仍无关系特征`],
-      ['关系降噪', coreEdgeQuality.pruned_semantic_only || 0, `弱语义单边已剔除 · ${coreEdgeQuality.retained_pairs || 0} 条可信关系`],
-      ['覆盖', actorDiversity.unique || 0, `有效演员 ${actorDiversity.effective || 0}`],
-      ['路线学习', `${activeRoutes}/${Object.keys(routes).length}`, `${stats.route_evaluation?.eligible || 0} 可评估 · ${stats.route_evaluation?.converted || 0} 合格 · ${stats.route_evaluation?.verified || 0} 入库`],
-      ['主题学习', `${activeTopics}/${Object.keys(topicMetrics).length}`, `${stats.topic_evaluation?.total_exposed || 0} 次主题曝光`],
-      ['当前意图', stats.session_intent?.event_count || 0, '12 小时渐进衰减'],
-      ['搜索学习', `${searchEvaluation.adaptive_signals || 0}/${searchEvaluation.signal_count || 0}`, `${searchEvaluation.eligible_events || 0} 个成熟样本`],
-      ['转化学习', `${outcomeLearning.trials || 0}/${outcomeLearning.minimum_trials || 12}`, outcomeLearning.status === 'protected' ? `小样本保护 · ${outcomeLearning.pending || 0} 观察中 · ${outcomeLearning.verified || 0} 已验证` : `可靠 ${Math.round((outcomeLearning.reliability || 0) * 100)}% · ${outcomeLearning.verified || 0} 已验证 · ${outcomeLearning.mature_unverified || 0} 未转化`],
-      ['意图门控', contextMixture.active ? `${Math.round((contextMixture.gate || 0) * 100)}%` : '待信号', contextMixture.active ? `可靠 ${Math.round((contextMixture.reliability || 0) * 100)}%` : '长期画像为主'],
-      ['曝光轮换', exposureFatigue.active || 0, `${exposureFatigue.short || 0} 短时 · ${exposureFatigue.long || 0} 长期`],
+    const coverage = Math.max(0, Math.min(100, Number(coreRecall.graph_coverage_percent || 0)))
+    const minimumTrials = Number(outcomeLearning.minimum_trials || 12)
+    const learningProgress = Math.max(0, Math.min(100, minimumTrials ? Number(outcomeLearning.trials || 0) / minimumTrials * 100 : 0))
+    const coreState = outcomeLearning.status === 'protected' ? '保护学习中' : '自适应运行中'
+    const cockpit = el('section', 'av-rec-core')
+    cockpit.innerHTML = `
+      <div class="av-rec-core-head">
+        <div class="av-rec-core-orb" style="--core-progress:${coverage * 3.6}deg"><i></i><span>${coverage.toFixed(1)}<small>%</small></span></div>
+        <div class="av-rec-core-title"><span>NOOR INTELLIGENCE CORE</span><strong>个性化决策引擎</strong><em>${escapeHtml(coreState)} · ${escapeHtml(data.model?.version || '模型待载入')}</em></div>
+        <div class="av-rec-core-live"><i></i><span>CORE ONLINE</span></div>
+      </div>
+      <div class="av-rec-core-metrics">
+        <div><span>知识画像</span><strong>${escapeHtml(coreRecall.unique_works || p.media_count || 0)}</strong><em>${escapeHtml(coreRecall.source_profiles || 0)} 条来源已融合</em></div>
+        <div><span>邻域召回</span><strong>${escapeHtml(coreRecall.selected || 0)}</strong><em>${escapeHtml(coreRecall.core_only_selected || 0)} 个仅由 Core 发现</em></div>
+        <div><span>推荐输出</span><strong>${escapeHtml(data.total || 0)}</strong><em>${escapeHtml(stats.candidates || 0)} 个候选参与排序</em></div>
+        <div><span>验证学习</span><strong>${escapeHtml(outcomeLearning.trials || 0)}<small>/${escapeHtml(minimumTrials)}</small></strong><em>${escapeHtml(outcomeLearning.pending || 0)} 观察中 · ${escapeHtml(outcomeLearning.verified || 0)} 已验证</em></div>
+      </div>
+      <div class="av-rec-core-flow" aria-label="推荐决策链">
+        <span class="is-ready"><i>01</i>媒体画像<small>${escapeHtml(p.media_count || 0)} 部</small></span>
+        <b></b><span class="is-ready"><i>02</i>关系召回<small>${coverage.toFixed(1)}% 覆盖</small></span>
+        <b></b><span class="is-ready"><i>03</i>个性排序<small>${escapeHtml(data.model?.mode === 'auto' ? '自动保护' : '策略锁定')}</small></span>
+        <b></b><span class="${outcomeLearning.status === 'protected' ? 'is-learning' : 'is-ready'}"><i>04</i>结果学习<small>${Math.round(learningProgress)}% 样本成熟度</small></span>
+      </div>`
+    profile.appendChild(cockpit)
+
+    const diagnosticGroups = [
+      ['图谱与画像', [
+        ['关系图', `${coverage.toFixed(1)}%`, `${coreRecall.linked_works || 0}/${coreRecall.unique_works || 0} 已连接 · ${coreRecall.isolated_works || 0} 孤立`],
+        ['离线找回', coreOffline.hit_rate?.['@20'] != null ? `${Math.round(coreOffline.hit_rate['@20'] * 100)}%` : '待评估', coreOffline.evaluated ? `${coreOffline.evaluated} 部留一验证` : '等待留一审计'],
+        ['特征净化', (coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0) + (coreFeatureQuality.dropped_code_prefix_categories || 0) + (coreFeatureQuality.dropped_operational_semantic_terms || 0), `${coreFeatureQuality.title_inferred_actor_features || 0} 个演员由 MDC-NG 映射补全`],
+        ['关系降噪', coreEdgeQuality.pruned_semantic_only || 0, `${coreEdgeQuality.retained_pairs || 0} 条可信关系保留`],
+        ['覆盖修复', `${coverageRepair.enriched || 0}/${coverageRepair.queued || 0}`, `${coverageRepair.failed || 0} 失败 · ${coreRecall.featureless_works || 0} 待补全`],
+      ]],
+      ['学习与校准', [
+        ['影子评估', `${shadow.paired_qualified || 0}/${shadow.minimum_qualified_sample || 20}`, shadow.recommended_policy === 'collecting' ? '静默采样中' : (shadow.reason || '共享候选对照')],
+        ['资源学习', `${resourceShadow.paired_qualified || 0}/${resourceShadow.minimum_qualified_sample || 20}`, resourceOutcome.status === 'active' ? `${resourceOutcome.eligible || 0} 个资源结果已校准` : '固定与学习权重对照中'],
+        ['路线 / 主题', `${activeRoutes}/${Object.keys(routes).length} · ${activeTopics}/${Object.keys(topicMetrics).length}`, `${stats.route_evaluation?.verified || 0} 次入库验证 · ${stats.topic_evaluation?.total_exposed || 0} 次主题曝光`],
+        ['搜索信号', `${searchEvaluation.adaptive_signals || 0}/${searchEvaluation.signal_count || 0}`, `${searchEvaluation.eligible_events || 0} 个成熟样本`],
+        ['时间画像', temporalScales.current?.work_count || 0, `${temporalScales.medium?.work_count || 0} 中期 · ${temporalScales.durable?.work_count || 0} 长期`],
+      ]],
+      ['运行状态', [
+        ['候选池', fmtPool(stats.candidate_pool_total, stats.candidate_pool_today), state.sourceMode === 'full' ? '完整累计 + 今日' : '历史累计 + 今日'],
+        ['当前意图', stats.session_intent?.event_count || 0, contextMixture.active ? `门控 ${Math.round((contextMixture.gate || 0) * 100)}% · 可靠 ${Math.round((contextMixture.reliability || 0) * 100)}%` : '长期画像为主'],
+        ['曝光轮换', exposureFatigue.active || 0, `${exposureFatigue.short || 0} 短时 · ${exposureFatigue.long || 0} 长期`],
+        ['关系策略', Object.keys(relationWeights).length || 0, relationPolicy.status === 'confirming' ? `确认 ${relationPolicy.confirmations || 0}/${relationPolicy.required_confirmations || 2}` : relationPolicy.status === 'promoted' ? '新策略已晋升' : '稳定策略'],
+        ['时间回测', temporalBacktest.recommended_policy === 'temporal' ? '近期增益' : temporalBacktest.recommended_policy === 'durable' ? '长期等权' : '采集中', temporalBacktest.evaluated ? `${temporalBacktest.evaluated} 个历史切点` : '等待历史样本'],
+      ]],
     ]
-    for (const [name, value, desc] of cards) {
-      const card = el('div', 'av-rec-stat')
-      card.innerHTML = `<span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong><em>${escapeHtml(desc)}</em>`
-      profile.appendChild(card)
+    const diagnostics = el('details', 'av-rec-diagnostics')
+    diagnostics.innerHTML = '<summary><span>Core 诊断</span><em>查看图谱、学习与运行细节</em><i>›</i></summary>'
+    const diagnosticBody = el('div', 'av-rec-diagnostic-body')
+    for (const [groupName, items] of diagnosticGroups) {
+      const group = el('section', 'av-rec-diagnostic-group')
+      group.innerHTML = `<h4>${escapeHtml(groupName)}</h4>`
+      for (const [name, value, desc] of items) group.innerHTML += `<div><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong><em>${escapeHtml(desc)}</em></div>`
+      diagnosticBody.appendChild(group)
     }
+    diagnostics.appendChild(diagnosticBody)
+    profile.appendChild(diagnostics)
     const prefs = el('div', 'av-rec-prefs')
     const groups = [
       ['演员', p.top_actors || []],
