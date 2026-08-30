@@ -8,7 +8,7 @@ from typing import Any
 
 from app.core.runtime_paths import plugin_data_path
 
-from .storage import MediaFile, get_media, next_mediainfo, queue_mediainfo, update_mediainfo, utcnow
+from .storage import MediaFile, emit_event, get_media, next_mediainfo, queue_mediainfo, update_mediainfo, utcnow
 from .strm import build_stream_url, stream_token
 
 SCHEMA_VERSION = 1
@@ -103,6 +103,10 @@ async def process_next(config: dict[str, Any]) -> dict[str, Any] | None:
         temporary.replace(cache_path)
         await asyncio.to_thread(update_mediainfo, media.file_id, status="ready", attempts=record.attempts + 1,
             next_retry_at=None, error_message="", json_path=str(cache_path), media=parsed, probed_at=utcnow())
+        await asyncio.to_thread(emit_event, "115.mediainfo.ready", file_id=media.file_id,
+            payload={"provider": "115", "file_id": media.file_id, "sha1": media.sha1, "size": media.size,
+                "schema_version": SCHEMA_VERSION, "cache_path": str(cache_path)},
+            dedupe_key=f"115.mediainfo.ready:{media.file_id}:{media.sha1}:{media.size}:v{SCHEMA_VERSION}")
         return {"file_id": media.file_id, "status": "ready", "cache_path": str(cache_path)}
     except Exception as exc:
         attempts = record.attempts + 1

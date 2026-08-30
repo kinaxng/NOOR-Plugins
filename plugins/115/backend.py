@@ -12,7 +12,7 @@ from .services.auth import code_challenge, poll_device_authorization, start_devi
 from .services.client import Client115, Error115, PLUGIN_ID, normalize_file
 from .services.offline import add_urls, list_remote_tasks
 from .services.mediainfo import enqueue as enqueue_mediainfo, process_next as process_next_mediainfo
-from .services.storage import create_task, find_duplicate, init_storage, list_media, list_tasks, media_dict, recover_interrupted_mediainfo, source_identity, task_dict, update_task, upsert_media, utcnow
+from .services.storage import acknowledge_event, create_task, emit_event, find_duplicate, init_storage, list_events, list_media, list_tasks, media_dict, recover_interrupted_mediainfo, source_identity, task_dict, update_task, upsert_media, utcnow
 from .services.strm import create_strm, is_media_file, resolve_stream as resolve_stream_service
 
 _auth_sessions: dict[str, dict[str, Any]] = {}
@@ -163,7 +163,13 @@ async def discover_completed_task(config: dict[str, Any], task: Any) -> list[str
         if not is_media_file(item, config):
             continue
         media, _created = await asyncio.to_thread(upsert_media, item, task_id=task.info_hash, display_path=item.get("display_path") or item["name"])
-        await asyncio.to_thread(create_strm, config, item)
+        strm = await asyncio.to_thread(create_strm, config, item)
+        await asyncio.to_thread(emit_event, "115.media.discovered", file_id=media.file_id,
+            payload={"provider": "115", "file_id": media.file_id, "sha1": media.sha1, "size": media.size, "name": media.name},
+            dedupe_key=f"115.media.discovered:{media.file_id}:{media.sha1}:{media.size}")
+        await asyncio.to_thread(emit_event, "115.strm.created", file_id=media.file_id,
+            payload={"provider": "115", "file_id": media.file_id, "local_path": strm["path"], "name": media.name},
+            dedupe_key=f"115.strm.created:{media.file_id}:{strm['path']}")
         if config.get("mediainfo_enabled", True):
             await asyncio.to_thread(enqueue_mediainfo, media)
         detected.append(media.file_id)
@@ -275,4 +281,11 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         return await sync_offline_tasks(config)
     if action == "media":
         return {"items": [media_dict(item) for item in await asyncio.to_thread(list_media, int(payload.get("limit") or 200))]}
+    if action == "pipeline_events":
+        return {"items": await asyncio.to_thread(list_events, pending_only=bool(payload.get("pending_only", True)), limit=int(payload.get("limit") or 100))}
+    if action == "ack_pipeline_event":
+        event_id = str(payload.get("event_id") or "")
+        if not event_id:
+            raise ValueError("missing event_id")
+        return {"ok": await asyncio.to_thread(acknowledge_event, event_id)}
     raise LookupError(f"unsupported 115 action: {action}")

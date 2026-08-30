@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -93,6 +94,19 @@ class MediaInfoRecord(Base):
     probed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PipelineEvent(Base):
+    __tablename__ = "cloud115_pipeline_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    file_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(256), unique=True, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 _db_path = plugin_data_path("115", "state.db")
@@ -345,3 +359,37 @@ def recover_interrupted_mediainfo() -> int:
             record.error_message = "worker interrupted before completion"
             record.updated_at = utcnow()
         return len(records)
+
+
+def emit_event(event_type: str, *, file_id: str = "", payload: dict[str, Any] | None = None, dedupe_key: str = "") -> PipelineEvent:
+    init_storage()
+    with Session.begin() as session:
+        stable_key = str(dedupe_key or f"{event_type}:{file_id}")
+        existing = session.scalar(select(PipelineEvent).where(PipelineEvent.dedupe_key == stable_key))
+        if existing:
+            return existing
+        event = PipelineEvent(id=str(uuid.uuid4()), event_type=str(event_type), file_id=str(file_id), dedupe_key=stable_key, payload=dict(payload or {}))
+        session.add(event)
+        return event
+
+
+def list_events(*, pending_only: bool = True, limit: int = 100) -> list[dict[str, Any]]:
+    init_storage()
+    with Session() as session:
+        statement = select(PipelineEvent)
+        if pending_only:
+            statement = statement.where(PipelineEvent.status == "pending")
+        rows = list(session.scalars(statement.order_by(PipelineEvent.created_at.asc()).limit(max(1, min(limit, 500)))).all())
+        return [{"id": row.id, "type": row.event_type, "file_id": row.file_id, "payload": dict(row.payload or {}),
+            "status": row.status, "created_at": row.created_at.isoformat() if row.created_at else ""} for row in rows]
+
+
+def acknowledge_event(event_id: str) -> bool:
+    init_storage()
+    with Session.begin() as session:
+        event = session.get(PipelineEvent, str(event_id))
+        if not event:
+            return False
+        event.status = "acknowledged"
+        event.acknowledged_at = utcnow()
+        return True
