@@ -1,7 +1,7 @@
 {
   "id": "av-recommend",
   "name": "推荐中心",
-  "version": "1.29.0",
+  "version": "1.30.0",
   "description": "基于媒体库偏好、JavDB 候选、完整候选池与资源可用性的推荐中心。",
   "type": "knowledge_app",
   "tags": ["official", "recommendation", "knowledge", "javdb"],

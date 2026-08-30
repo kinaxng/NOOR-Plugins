@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens, work_similarity_recall_evaluation, work_similarity_status
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens, work_similarity_recall_evaluation, work_similarity_status, work_similarity_temporal_backtest
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 39
-PERSONALIZED_MODEL_VERSION = "personal-v39"
+RECOMMENDATION_ALGORITHM_VERSION = 40
+PERSONALIZED_MODEL_VERSION = "personal-v40"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -1954,6 +1954,7 @@ async def _library_profile() -> dict[str, Any]:
         "codes": set(),
         "media_by_code": {},
         "code_weights": {},
+        "acquisition_times": {},
         "actors": Counter(),
         "actor_identities": Counter(),
         "genres": Counter(),
@@ -1984,6 +1985,7 @@ async def _library_profile() -> dict[str, Any]:
             "codes": set(),
             "media_by_code": {},
             "code_weights": {},
+            "acquisition_times": {},
             "actors": Counter(),
             "actor_identities": Counter(),
             "genres": Counter(),
@@ -2027,6 +2029,10 @@ async def _library_profile() -> dict[str, Any]:
                     profile["codes"].add(code)
                     profile["media_by_code"][code] = _entity_payload(media_by_id.get(edge.source_entity_id)) if media_by_id.get(edge.source_entity_id) else None
                     profile["code_weights"][code] = max(float(profile["code_weights"].get(code) or 0), float(media_weights.get(edge.source_entity_id, 1.0)))
+                    media_entity = media_by_id.get(edge.source_entity_id)
+                    acquired_at = str(((media_entity.data or {}).get("date_created") if media_entity and isinstance(media_entity.data, dict) else "") or "").strip()
+                    if acquired_at:
+                        profile["acquisition_times"][code] = acquired_at
                     semantic_work_weights[code] = max(semantic_work_weights.get(code, 0), media_weights.get(edge.source_entity_id, 1.0))
             elif rel == "HAS_ACTOR":
                 actor_name = canonical_actor_name(target.label)
@@ -3811,6 +3817,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     pool_items = pool.get("items") if isinstance(pool.get("items"), dict) else {}
     similarity_meta: dict[str, Any] = {}
     similarity_evaluation: dict[str, Any] = {}
+    temporal_backtest: dict[str, Any] = {}
     if source_mode == "full":
         candidates = [dict(item) for item in pool_items.values() if isinstance(item, dict)]
         warnings: list[str] = []
@@ -3834,7 +3841,14 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
 
     try:
         from app.knowledge.intelligence import work_similarity_candidates
-        graph_seed_weights, graph_seed_sources = _positive_neighbor_seed_weights(profile, behavior, store)
+        try:
+            temporal_backtest = await work_similarity_temporal_backtest(profile.get("acquisition_times") or {})
+        except Exception as exc:
+            temporal_backtest = {"recommended_policy": "collecting", "error": str(exc), "evaluated": 0}
+        graph_profile = profile
+        if temporal_backtest.get("recommended_policy") != "temporal":
+            graph_profile = {**profile, "code_weights": {code: 0.75 for code in (profile.get("code_weights") or {})}}
+        graph_seed_weights, graph_seed_sources = _positive_neighbor_seed_weights(graph_profile, behavior, store)
         try:
             similarity_evaluation = await work_similarity_recall_evaluation(
                 set(profile.get("codes") or []),
@@ -4012,6 +4026,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "scales": dict(((behavior.get("trends") or {}).get("scales") or {})),
                 "rising_actors": list((((behavior.get("trends") or {}).get("actors") or {}).get("rising") or []))[:5],
                 "rising_categories": list((((behavior.get("trends") or {}).get("categories") or {}).get("rising") or []))[:5],
+                "backtest": temporal_backtest,
             },
             "exposure_fatigue": {
                 "active": len(exposure_fatigue),
