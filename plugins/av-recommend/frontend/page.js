@@ -255,6 +255,7 @@ export async function mount(root, sdk) {
     const coreFeatureQuality = coreRecall.feature_quality || {}
     const coreEdgeQuality = coreRecall.edge_quality || {}
     const coreOffline = coreRecall.offline_evaluation || {}
+    const relationPolicy = coreOffline.relation_counterfactual?.policy || {}
     const coverageRepair = coreRecall.coverage_repair_state || {}
     const relationWeights = coreRecall.relation_weights || {}
     const temporal = stats.temporal_preference || {}
@@ -276,7 +277,7 @@ export async function mount(root, sdk) {
       ['画像融合', coreRecall.unique_works || 0, `${coreRecall.source_profiles || 0} 条来源画像 · ${coreRecall.duplicate_profiles || 0} 条重复已融合`],
       ['离线找回', coreOffline.hit_rate?.['@20'] != null ? `${Math.round(coreOffline.hit_rate['@20'] * 100)}%` : '待评估', coreOffline.evaluated ? `${coreOffline.evaluated} 部留一 · 覆盖 ${Math.round((coreOffline.coverage || 0) * 100)}%` : '留一邻域审计'],
       ['覆盖修复', `${coverageRepair.enriched || 0}/${coverageRepair.queued || 0}`, `${coreRecall.coverage_repair_queued || 0} 个本轮加入 · ${coverageRepair.failed || 0} 失败`],
-      ['关系校准', Object.keys(relationWeights).length || 0, Object.keys(relationWeights).length ? Object.entries(relationWeights).map(([key, value]) => `${key} ${Math.round(value * 100)}%`).join(' · ') : '训练/验证暂无一致调整'],
+      ['关系校准', Object.keys(relationWeights).length || 0, Object.keys(relationWeights).length ? `${Object.entries(relationWeights).map(([key, value]) => `${key} ${Math.round(value * 100)}%`).join(' · ')} · ${relationPolicy.status === 'confirming' ? `候选确认 ${relationPolicy.confirmations || 0}/${relationPolicy.required_confirmations || 2}` : relationPolicy.status === 'promoted' ? '新策略已晋升' : '稳定策略'}` : '训练/验证暂无一致调整'],
       ['时间画像', temporalScales.current?.work_count || 0, `${temporalScales.medium?.work_count || 0} 中期 · ${temporalScales.durable?.work_count || 0} 长期`],
       ['时间回测', temporalBacktest.recommended_policy === 'temporal' ? '近期增益' : temporalBacktest.recommended_policy === 'durable' ? '长期等权' : '采集中', temporalBacktest.evaluated ? `${temporalBacktest.evaluated} 个历史切点 · 验证 ${Math.round((temporalBacktest.utility_delta?.validation || 0) * 10000) / 100}%` : '等待足够历史样本'],
       ['特征净化', (coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0) + (coreFeatureQuality.dropped_code_prefix_categories || 0), `${(coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0)} 演员重复 · ${coreFeatureQuality.dropped_code_prefix_categories || 0} 番号前缀`],
