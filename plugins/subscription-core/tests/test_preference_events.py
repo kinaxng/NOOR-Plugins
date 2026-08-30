@@ -42,3 +42,30 @@ def test_create_subscription_records_idempotent_core_stage(monkeypatch) -> None:
     assert recorded[0][0] == "subscription"
     assert recorded[0][1].endswith(":subscription")
     assert recorded[1] == recorded[0]
+
+
+def test_historical_subscription_stages_preserve_observed_times(monkeypatch) -> None:
+    backend = _backend()
+    backend._core_history_revision = ""
+    recorded = []
+    data = {"subscriptions": [{
+        "id": "sub-1",
+        "code": "DVAJ-727",
+        "status": "submitted",
+        "created_at": "2026-08-20T10:00:00+00:00",
+        "last_submit_at": "2026-08-21T11:00:00+00:00",
+        "last_submit_resource_key": "resource-1",
+        "submitted_downloader_id": "qbittorrent",
+    }]}
+
+    async def record(sub: dict, event_type: str, payload: dict | None = None):
+        recorded.append((sub["code"], event_type, dict(payload or {})))
+
+    monkeypatch.setattr(backend, "_record_core_outcome", record)
+
+    assert asyncio.run(backend._sync_core_history(data)) == 2
+    assert asyncio.run(backend._sync_core_history(data)) == 0
+    assert [row[1] for row in recorded] == ["subscription", "download_submitted"]
+    assert recorded[0][2]["observed_at"] == "2026-08-20T10:00:00+00:00"
+    assert recorded[1][2]["observed_at"] == "2026-08-21T11:00:00+00:00"
+    assert recorded[1][2]["evidence_id"] == "sub-1:resource-1"

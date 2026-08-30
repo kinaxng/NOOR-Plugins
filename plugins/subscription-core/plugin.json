@@ -1,7 +1,7 @@
 {
   "id": "subscription-core",
   "name": "订阅中心",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "tool",
   "description": "NOOR 官方内置订阅与洗版中心。",
   "tags": ["official", "subscription", "upgrade", "resource"],

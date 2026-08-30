@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import time
@@ -16,6 +17,7 @@ from app.knowledge.intelligence import enqueue_resource_refresh, record_preferen
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
 PLUGIN_ID = "subscription-core"
+_core_history_revision = ""
 
 
 def _data_file() -> Path:
@@ -151,6 +153,45 @@ async def _record_core_outcome(sub: dict[str, Any], event_type: str, payload: di
     except Exception:
         # Intelligence evidence must not break the subscription workflow.
         pass
+
+
+async def _sync_core_history(data: dict[str, Any]) -> int:
+    """Backfill durable lifecycle stages created before Core event capture."""
+    global _core_history_revision
+    rows = [
+        {
+            "id": str(sub.get("id") or ""),
+            "code": str(sub.get("code") or ""),
+            "status": str(sub.get("status") or ""),
+            "created_at": str(sub.get("created_at") or ""),
+            "last_submit_at": str(sub.get("last_submit_at") or ""),
+            "last_submit_resource_key": str(sub.get("last_submit_resource_key") or ""),
+            "downloader_id": str(sub.get("submitted_downloader_id") or ""),
+        }
+        for sub in data.get("subscriptions") or []
+        if isinstance(sub, dict) and sub.get("status") != "deleted" and sub.get("id") and sub.get("code")
+    ]
+    revision = hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    if revision == _core_history_revision:
+        return 0
+    recorded = 0
+    for row, sub in zip(rows, [sub for sub in data.get("subscriptions") or [] if isinstance(sub, dict) and sub.get("status") != "deleted" and sub.get("id") and sub.get("code")]):
+        await _record_core_outcome(sub, "subscription", {
+            "evidence_id": f"{row['id']}:subscription",
+            "observed_at": row["created_at"],
+            "historical_sync": True,
+        })
+        recorded += 1
+        if row["last_submit_at"] or row["last_submit_resource_key"] or row["status"] == "submitted":
+            await _record_core_outcome(sub, "download_submitted", {
+                "evidence_id": f"{row['id']}:{row['last_submit_resource_key'] or row['last_submit_at']}",
+                "observed_at": row["last_submit_at"],
+                "downloader_id": row["downloader_id"],
+                "historical_sync": True,
+            })
+            recorded += 1
+    _core_history_revision = revision
+    return recorded
 
 
 
@@ -1456,6 +1497,7 @@ async def handle_action(action: str, payload: dict[str, Any], config: dict[str, 
     config = config or {}
     payload = payload or {}
     data = _ensure_store()
+    await _sync_core_history(data)
     if _normalize_waiting_quota_records(data):
         _save(data)
     if action == "overview":
