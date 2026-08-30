@@ -68,6 +68,25 @@ def test_core_evaluation_updates_cached_diagnostics_without_staling_cards(monkey
     assert cached["cache_status"]["status"] == "fresh"
 
 
+def test_outcome_calibration_cannot_multiply_small_samples_with_many_labels() -> None:
+    backend = _backend()
+    model = {
+        "trials": 3,
+        "actors": {"actor:a": {"rate": 0.8, "reliability": 1 / 6}},
+        "categories": {
+            f"分类{index}": {"rate": 0.8, "reliability": 1 / 6}
+            for index in range(12)
+        },
+    }
+
+    one = backend._outcome_calibration(model, ["actor:a"], ["分类0"])
+    many = backend._outcome_calibration(model, ["actor:a"], list(model["categories"]))
+
+    assert round(one["reliability"], 4) == round(many["reliability"], 4) == 0.1667
+    assert abs(many["score"]) < 1
+    assert many["score"] == one["score"]
+
+
 def test_session_intent_uses_identity_and_half_life(monkeypatch) -> None:
     backend = _backend()
     monkeypatch.setattr(backend, "actor_identity_key", lambda value: "actor:one" if value else "")
@@ -220,9 +239,9 @@ def test_topic_match_requires_the_labeled_anchor_and_relation() -> None:
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 69
-    assert backend.RANKING_POLICY_VERSION == 57
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v57"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 70
+    assert backend.RANKING_POLICY_VERSION == 58
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v58"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000

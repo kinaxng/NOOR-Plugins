@@ -46,10 +46,10 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 69
+RECOMMENDATION_ALGORITHM_VERSION = 70
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
-RANKING_POLICY_VERSION = 57
+RANKING_POLICY_VERSION = 58
 PERSONALIZED_MODEL_VERSION = f"personal-v{RANKING_POLICY_VERSION}"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
@@ -1894,6 +1894,40 @@ def _generic_category_factor(name: Any) -> float:
     return 1.0
 
 
+def _outcome_calibration(outcome_model: dict[str, Any], actor_identities: list[str], categories: list[str]) -> dict[str, float]:
+    """Calibrate outcome evidence without treating correlated labels as samples."""
+    actor_rows = outcome_model.get("actors") if isinstance(outcome_model.get("actors"), dict) else {}
+    category_rows = outcome_model.get("categories") if isinstance(outcome_model.get("categories"), dict) else {}
+    groups: list[tuple[float, float]] = []
+    actor_signals = [actor_rows.get(identity) for identity in actor_identities if isinstance(actor_rows.get(identity), dict)]
+    if actor_signals:
+        weight = max(float(row.get("reliability") or 0) for row in actor_signals)
+        total = sum(float(row.get("reliability") or 0) for row in actor_signals)
+        rate = sum(float(row.get("rate") or 0.5) * float(row.get("reliability") or 0) for row in actor_signals) / max(total, 1e-9)
+        groups.append((rate, weight))
+    category_signals = [
+        (category_rows.get(category), _generic_category_factor(category))
+        for category in categories
+        if isinstance(category_rows.get(category), dict)
+    ]
+    if category_signals:
+        weights = [float(row.get("reliability") or 0) * factor for row, factor in category_signals]
+        weight = max(weights, default=0.0)
+        rate = sum(float(row.get("rate") or 0.5) * item_weight for (row, _factor), item_weight in zip(category_signals, weights)) / max(sum(weights), 1e-9)
+        groups.append((rate, weight))
+    group_weight = sum(weight for _rate, weight in groups)
+    if group_weight <= 0:
+        return {"score": 0.0, "rate": 0.5, "reliability": 0.0, "trials": float(outcome_model.get("trials") or 0)}
+    calibrated_rate = sum(rate * weight for rate, weight in groups) / group_weight
+    trials = max(0, int(outcome_model.get("trials") or 0))
+    global_reliability = trials / (trials + 12)
+    # The strongest matched feature controls evidence quality. More correlated
+    # labels may refine the rate estimate, but cannot manufacture sample size.
+    reliability = min(global_reliability, max(weight for _rate, weight in groups))
+    score = max(-6.0, min(6.0, (calibrated_rate - 0.5) * 18 * reliability))
+    return {"score": score, "rate": calibrated_rate, "reliability": reliability, "trials": float(trials)}
+
+
 def _title_text(value: Any) -> str:
     if not isinstance(value, dict):
         return str(value or "").strip()
@@ -3309,22 +3343,9 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         trend_preference_score += search_intent_score
         reasons.append("当前组合搜索方向" if matched_search_combinations else "当前搜索方向")
 
-    outcome_signals: list[tuple[float, float]] = []
-    actor_outcomes = outcome_model.get("actors") if isinstance(outcome_model.get("actors"), dict) else {}
-    category_outcomes = outcome_model.get("categories") if isinstance(outcome_model.get("categories"), dict) else {}
-    for identity in actor_identities:
-        row = actor_outcomes.get(identity) if isinstance(actor_outcomes.get(identity), dict) else None
-        if row:
-            outcome_signals.append((float(row.get("rate") or 0.5), float(row.get("reliability") or 0)))
-    for category in categories:
-        row = category_outcomes.get(category) if isinstance(category_outcomes.get(category), dict) else None
-        if row:
-            outcome_signals.append((float(row.get("rate") or 0.5), float(row.get("reliability") or 0) * _generic_category_factor(category)))
-    signal_weight = sum(weight for _rate, weight in outcome_signals)
-    if signal_weight > 0:
-        calibrated_rate = sum(rate * weight for rate, weight in outcome_signals) / signal_weight
-        reliability = min(1.0, signal_weight / 3)
-        outcome_calibration_score = max(-6.0, min(6.0, (calibrated_rate - 0.5) * 18 * reliability))
+    outcome_calibration = _outcome_calibration(outcome_model, actor_identities, categories)
+    outcome_calibration_score = float(outcome_calibration["score"])
+    if float(outcome_calibration["reliability"]) > 0:
         score += outcome_calibration_score
         personalized_score += outcome_calibration_score
         if outcome_calibration_score >= 0.8:
