@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 26
-PERSONALIZED_MODEL_VERSION = "personal-v26"
+RECOMMENDATION_ALGORITHM_VERSION = 27
+PERSONALIZED_MODEL_VERSION = "personal-v27"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -3640,6 +3640,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "route_evaluation": route_evaluation,
             "exploration_evaluation": exploration_evaluation,
             "topic_evaluation": topic_evaluation,
+            "search_evaluation": core_search_intent["evaluation"],
             "session_intent": {
                 "event_count": session_intent["event_count"] + core_search_intent["event_count"],
                 "interaction_events": session_intent["event_count"],

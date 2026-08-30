@@ -51,8 +51,10 @@ def test_topic_feedback_is_counted_without_hard_exclusion() -> None:
     ]) == Counter({"topic:a": 2})
 
 
-def test_v26_search_intent_scores_canonical_actor_category_and_title_term() -> None:
+def test_v27_search_intent_scores_canonical_actor_category_and_title_term() -> None:
     backend = _backend()
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 27
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v27"
     identity = backend.actor_identity_key("吉沢明歩")
     profile = {
         "codes": set(), "actor_identities": Counter(), "actors": Counter(),
