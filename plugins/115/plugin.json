@@ -1,7 +1,7 @@
 {
   "id": "115",
   "name": "115",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "downloader",
   "description": "115 Open Platform 离线下载、稳定 STRM 与媒体情报流水线。",
   "tags": ["115", "cloud", "downloader", "strm", "mediainfo"],
@@ -18,6 +18,8 @@
     "mediainfo_enabled": {"type": "boolean", "label": "生成后提取 MediaInfo", "default": true},
     "mediainfo_concurrency": {"type": "number", "label": "MediaInfo 并发", "description": "默认 1；提高并发可能增加网盘风控风险。", "default": 1, "min": 1, "max": 4},
     "api_min_interval": {"type": "number", "label": "API 最小请求间隔（秒）", "default": 1, "min": 0.2, "max": 10, "step": 0.2},
+    "offline_poll_interval": {"type": "number", "label": "离线任务检查间隔（秒）", "default": 60, "min": 30, "max": 600},
+    "offline_poll_max_pages": {"type": "number", "label": "任务列表最大检查页数", "description": "仅查询官方离线任务列表，不扫描网盘文件。", "default": 5, "min": 1, "max": 20},
     "timeout": {"type": "number", "label": "API 超时（秒）", "default": 20, "min": 5, "max": 60}
   },
   "default_config": {
@@ -31,6 +33,8 @@
     "mediainfo_enabled": true,
     "mediainfo_concurrency": 1,
     "api_min_interval": 1,
+    "offline_poll_interval": 60,
+    "offline_poll_max_pages": 5,
     "timeout": 20
   },
   "contributions": {
@@ -46,4 +50,3 @@
   },
   "frontend": {"type": "module", "entry": "frontend/page.js", "style": "frontend/style.css"}
 }
-

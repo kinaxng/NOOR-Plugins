@@ -17,6 +17,7 @@ export async function mount(root, sdk) {
     tabs: [{ key: 'account', label: '账号' }, { key: 'tasks', label: '离线任务' }, { key: 'media', label: '媒体' }],
     onChange: key => {
       page.querySelectorAll('[data-panel]').forEach(node => { node.hidden = node.dataset.panel !== key })
+      if (key === 'tasks') loadTasks()
     },
   }) : document.createElement('div')
   const actions = document.createElement('div')
@@ -33,7 +34,7 @@ export async function mount(root, sdk) {
   const taskPanel = document.createElement('section')
   taskPanel.dataset.panel = 'tasks'
   taskPanel.hidden = true
-  taskPanel.innerHTML = '<div class="noor-plugin-115-empty"><strong>离线任务将在下一里程碑接入</strong><span>任务会通过 NOOR 下载器体系统一提交和跟踪。</span></div>'
+  taskPanel.innerHTML = '<div class="noor-plugin-115-empty"><strong>正在读取离线任务</strong></div>'
   const mediaPanel = document.createElement('section')
   mediaPanel.dataset.panel = 'media'
   mediaPanel.hidden = true
@@ -121,7 +122,20 @@ export async function mount(root, sdk) {
     renderAccount()
   }
 
+  async function loadTasks() {
+    try {
+      const response = await sdk.api.post('/plugins/115/actions/tasks', { payload: { limit: 100 } })
+      const items = (response?.data || response)?.items || []
+      if (!items.length) {
+        taskPanel.innerHTML = '<div class="noor-plugin-115-empty"><strong>暂无离线任务</strong><span>可以从订阅中心或资源卡片推送到 115。</span></div>'
+        return
+      }
+      taskPanel.innerHTML = `<div class="noor-plugin-115-task-list">${items.map(item => `<article><div><strong>${item.name || item.source_hint || '115 离线任务'}</strong><span>${item.source_kind} · 目录 ${item.target_directory_id}</span></div><em class="is-${item.status}">${item.status}</em><b>${item.progress || 0}%</b><small>${item.created_at || ''}</small></article>`).join('')}</div>`
+    } catch (error) {
+      taskPanel.innerHTML = `<div class="noor-plugin-115-empty"><strong>离线任务读取失败</strong><span>${error?.response?.data?.detail || error?.message || ''}</span></div>`
+    }
+  }
+
   await loadAccount()
   return () => { stopPolling(); root.innerHTML = '' }
 }
-
