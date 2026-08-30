@@ -46,7 +46,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 63
+RECOMMENDATION_ALGORITHM_VERSION = 64
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
 RANKING_POLICY_VERSION = 57
@@ -3841,20 +3841,29 @@ async def _enrich_recommendation_resources(
         for task in pending:
             task.cancel()
             task.add_done_callback(_consume_background_task)
-        async def enqueue_later() -> None:
-            try:
-                from app.knowledge.intelligence import enqueue_resource_refresh
-                await enqueue_resource_refresh(pending_codes, priority=20)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
-
-        enqueue_task = asyncio.create_task(enqueue_later())
-        _resource_enqueue_tasks.add(enqueue_task)
-        enqueue_task.add_done_callback(_resource_enqueue_tasks.discard)
+        _schedule_resource_refresh_codes(pending_codes)
         warnings.append(f"正在后台补全 {len(pending)} 部作品的资源情报")
     return warnings[:8]
+
+
+def _schedule_resource_refresh_codes(codes: list[str]) -> int:
+    pending_codes = list(dict.fromkeys(str(code or "").strip() for code in codes if str(code or "").strip()))
+    if not pending_codes:
+        return 0
+
+    async def enqueue_later() -> None:
+        try:
+            from app.knowledge.intelligence import enqueue_resource_refresh
+            await enqueue_resource_refresh(pending_codes, priority=20)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    enqueue_task = asyncio.create_task(enqueue_later())
+    _resource_enqueue_tasks.add(enqueue_task)
+    enqueue_task.add_done_callback(_resource_enqueue_tasks.discard)
+    return len(pending_codes)
 
 
 def _dedupe_recommendations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4576,9 +4585,13 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     # Diversification can promote candidates that were outside the first-pass
     # window. Confirm the cards that will actually be displayed as a second
     # pass, skipping rows already enriched above.
-    display_resource_warnings = await _enrich_recommendation_resources(config, scored)
-    if display_resource_warnings:
-        warnings.extend(display_resource_warnings)
+    missing_resource_codes = [
+        str(item.get("code") or "") for item in scored
+        if not isinstance(item.get("resource_summary"), dict)
+    ]
+    queued_resource_count = _schedule_resource_refresh_codes(missing_resource_codes)
+    if queued_resource_count:
+        warnings.append(f"正在后台补全 {queued_resource_count} 部作品的资源情报")
     mark_timing("display_resources")
     enrichment_public_state = _profile_enrichment_public_state()
     result = {
