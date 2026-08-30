@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 55
-PERSONALIZED_MODEL_VERSION = "personal-v55"
+RECOMMENDATION_ALGORITHM_VERSION = 56
+PERSONALIZED_MODEL_VERSION = "personal-v56"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -3134,6 +3134,9 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
                 "label": topic.get("label"),
                 "confidence": round(confidence, 3),
                 "support": int(topic.get("support") or 0),
+                "relation_type": topic.get("relation_type") or "anchor",
+                "relation_support": int(topic.get("relation_support") or topic.get("support") or 0),
+                "relation_confidence": round(float(topic.get("relation_confidence") or confidence), 3),
                 "actor_matches": sorted(actor_matches),
                 "category_matches": sorted(category_matches),
                 "score": round(topic_score, 2),
