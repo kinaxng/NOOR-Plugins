@@ -150,6 +150,31 @@ def _recommendation_cache_put(cache_key: str, value: dict[str, Any], *, source_m
     _CACHE["entries"] = dict(data["entries"])
 
 
+def _update_cached_core_evaluation(evaluation: dict[str, Any]) -> None:
+    """Patch diagnostics in place without expiring ranked recommendation cards."""
+    if not isinstance(evaluation, dict) or not evaluation:
+        return
+    data = _load_recommendation_cache()
+    entries = data.get("entries") if isinstance(data.get("entries"), dict) else {}
+    changed = False
+    for entry in entries.values():
+        value = entry.get("value") if isinstance(entry, dict) else None
+        stats = value.get("stats") if isinstance(value, dict) else None
+        recall = stats.get("neighbor_recall") if isinstance(stats, dict) else None
+        if not isinstance(recall, dict):
+            continue
+        recall["offline_evaluation"] = copy.deepcopy(evaluation)
+        changed = True
+    if not changed:
+        return
+    path = _recommendation_cache_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    _CACHE["entries"] = dict(entries)
+
+
 def _latest_mode_snapshot(source_mode: str, requested_limit: int, *, ttl_seconds: int = DEFAULT_CACHE_TTL, max_age_seconds: int = 23400) -> dict[str, Any] | None:
     """Return a bounded persisted snapshot without waiting for a generation lock."""
     entries = _load_recommendation_cache().get("entries", {})
@@ -4755,7 +4780,8 @@ def _schedule_core_evaluation(acquisition_times: dict[str, Any], target_codes: s
         try:
             await asyncio.sleep(5)
             await work_similarity_temporal_backtest(dict(acquisition_times))
-            await work_similarity_recall_evaluation(set(target_codes), dict(seed_weights))
+            evaluation = await work_similarity_recall_evaluation(set(target_codes), dict(seed_weights))
+            await asyncio.to_thread(_update_cached_core_evaluation, evaluation)
         except asyncio.CancelledError:
             raise
         except Exception:

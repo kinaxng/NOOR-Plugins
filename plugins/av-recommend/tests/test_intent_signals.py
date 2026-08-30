@@ -48,6 +48,26 @@ async def _core_evaluation_does_not_invalidate_content_cache(monkeypatch) -> Non
     assert [row[0] for row in calls] == ["temporal", "recall"]
 
 
+def test_core_evaluation_updates_cached_diagnostics_without_staling_cards(monkeypatch, tmp_path) -> None:
+    backend = _backend()
+    cache_file = tmp_path / "recommendations.json"
+    monkeypatch.setattr(backend, "_recommendation_cache_file", lambda: cache_file)
+    backend._CACHE["entries"] = {}
+    value = {
+        "algorithm_version": backend.RECOMMENDATION_ALGORITHM_VERSION,
+        "items": [{"code": "AAA-001"}],
+        "stats": {"neighbor_recall": {"offline_evaluation": {"revision": "old", "stale": True}}},
+    }
+    backend._recommendation_cache_put("latest", value, source_mode="latest")
+
+    backend._update_cached_core_evaluation({"revision": "new", "stale": False})
+
+    cached = backend._recommendation_cache_get("latest", annotate=True)
+    assert cached["items"] == [{"code": "AAA-001"}]
+    assert cached["stats"]["neighbor_recall"]["offline_evaluation"] == {"revision": "new", "stale": False}
+    assert cached["cache_status"]["status"] == "fresh"
+
+
 def test_session_intent_uses_identity_and_half_life(monkeypatch) -> None:
     backend = _backend()
     monkeypatch.setattr(backend, "actor_identity_key", lambda value: "actor:one" if value else "")
