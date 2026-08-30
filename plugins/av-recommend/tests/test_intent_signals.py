@@ -111,7 +111,7 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 33
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 34
     assert backend.PERSONALIZED_MODEL_VERSION == "personal-v32"
     hour = 3_600_000
     day = 24 * hour
@@ -187,3 +187,36 @@ def test_v32_shadow_evaluation_promotes_only_with_confident_shared_outcomes() ->
 def test_mdc_ng_actor_aliases_share_one_recommendation_identity() -> None:
     backend = _backend()
     assert backend.actor_identity_key("吉泽明步") == backend.actor_identity_key("吉沢明歩")
+
+
+def test_coverage_repair_queue_is_bounded_actionable_and_cooled_down(monkeypatch) -> None:
+    backend = _backend()
+    backend._profile_enrichment_pending = {}
+    backend._profile_enrichment_attempts = {}
+    backend._profile_enrichment_task = None
+    backend._profile_enrichment_state = {
+        "status": "idle", "queued": 0, "coverage_queued": 0,
+        "coverage_enriched": 0, "coverage_failed": 0, "coverage_last_queued_at": 0.0,
+    }
+    monkeypatch.setattr(backend, "_pool", lambda: {"items": {}})
+
+    class DoneTask:
+        def done(self):
+            return False
+
+    def fake_create_task(coro):
+        coro.close()
+        return DoneTask()
+
+    monkeypatch.setattr(backend.asyncio, "create_task", fake_create_task)
+    rows = [
+        {"code": "AAA-001", "profile_gaps": ["actors"]},
+        {"code": "AAA-002", "profile_gaps": ["categories"]},
+        {"code": "AAA-003", "profile_gaps": ["title"]},
+        {"code": "AAA-004", "profile_gaps": ["maker"]},
+    ]
+
+    assert backend._queue_profile_enrichment({}, rows, max_accept=2, reason="offline_no_path") == 2
+    assert list(backend._profile_enrichment_pending) == ["AAA-001", "AAA-002"]
+    assert backend._profile_enrichment_state["coverage_queued"] == 2
+    assert backend._queue_profile_enrichment({}, rows, max_accept=2, reason="offline_no_path") == 0

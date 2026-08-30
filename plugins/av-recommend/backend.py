@@ -46,7 +46,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 33
+RECOMMENDATION_ALGORITHM_VERSION = 34
 PERSONALIZED_MODEL_VERSION = "personal-v32"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
@@ -81,7 +81,7 @@ _prewarm_state: dict[str, Any] = {"status": "idle", "last_started_at": None, "la
 _profile_enrichment_task: asyncio.Task[None] | None = None
 _profile_enrichment_pending: dict[str, dict[str, Any]] = {}
 _profile_enrichment_attempts: dict[str, float] = {}
-_profile_enrichment_state: dict[str, Any] = {"status": "idle", "queued": 0, "enriched": 0, "failed": 0, "last_finished_at": None, "last_error": ""}
+_profile_enrichment_state: dict[str, Any] = {"status": "idle", "queued": 0, "enriched": 0, "failed": 0, "coverage_queued": 0, "coverage_enriched": 0, "coverage_failed": 0, "coverage_last_queued_at": 0.0, "last_finished_at": None, "last_error": ""}
 _title_profile_refresh_task: asyncio.Task[None] | None = None
 
 
@@ -470,6 +470,7 @@ async def _run_profile_enrichment(config: dict[str, Any]) -> None:
     try:
         while _profile_enrichment_pending:
             batch_codes = list(_profile_enrichment_pending)[:12]
+            batch_jobs = {code: dict(_profile_enrichment_pending.get(code) or {}) for code in batch_codes}
             for code in batch_codes:
                 _profile_enrichment_pending.pop(code, None)
             _profile_enrichment_state["queued"] = len(_profile_enrichment_pending)
@@ -495,6 +496,8 @@ async def _run_profile_enrichment(config: dict[str, Any]) -> None:
                     if not data:
                         item["profile_enrichment_error"] = error or "未返回作品详情"
                         failed += 1
+                        if batch_jobs.get(code, {}).get("reason") == "offline_no_path":
+                            _profile_enrichment_state["coverage_failed"] = int(_profile_enrichment_state.get("coverage_failed") or 0) + 1
                     else:
                         item = _merge_candidate(item, data, "core-profile", "Core 画像补全")
                         item["detail"] = data
@@ -504,6 +507,8 @@ async def _run_profile_enrichment(config: dict[str, Any]) -> None:
                         item["fanart_url"] = data.get("fanart_url") or data.get("cover_url") or item.get("fanart_url") or ""
                         item["profile_enrichment_error"] = ""
                         enriched += 1
+                        if batch_jobs.get(code, {}).get("reason") == "offline_no_path":
+                            _profile_enrichment_state["coverage_enriched"] = int(_profile_enrichment_state.get("coverage_enriched") or 0) + 1
                     items[code] = item
                 pool["items"] = items
                 _save_pool(pool)
@@ -523,19 +528,32 @@ async def _run_profile_enrichment(config: dict[str, Any]) -> None:
             _profile_enrichment_task = asyncio.create_task(_run_profile_enrichment(dict(config)))
 
 
-def _queue_profile_enrichment(config: dict[str, Any], items: list[dict[str, Any]]) -> int:
+def _queue_profile_enrichment(config: dict[str, Any], items: list[dict[str, Any]], *, max_accept: int = 48, reason: str = "candidate_gap") -> int:
     global _profile_enrichment_task
     now = time.time()
+    max_accept = max(1, min(int(max_accept or 1), 48))
+    if reason == "offline_no_path" and now - float(_profile_enrichment_state.get("coverage_last_queued_at") or 0) < 6 * 3600:
+        return 0
+    pool_items = (_pool().get("items") or {}) if reason == "offline_no_path" else {}
     accepted = 0
     for item in items:
         code = _candidate_code(item)
-        if not code or not _candidate_profile_gaps(item) or now - float(_profile_enrichment_attempts.get(code) or 0) < 6 * 3600:
+        requested_gaps = item.get("profile_gaps") if isinstance(item.get("profile_gaps"), list) else _candidate_profile_gaps(item)
+        actionable_gaps = [gap for gap in requested_gaps if gap in {"cover", "actors", "categories", "title"}]
+        persisted = pool_items.get(code) if isinstance(pool_items.get(code), dict) else {}
+        persisted_at = 0.0
+        with contextlib.suppress(ValueError, TypeError):
+            persisted_at = dt.datetime.fromisoformat(str(persisted.get("profile_enrichment_at") or "")).timestamp()
+        if not code or not actionable_gaps or now - max(float(_profile_enrichment_attempts.get(code) or 0), persisted_at) < 6 * 3600:
             continue
         if code not in _profile_enrichment_pending:
-            _profile_enrichment_pending[code] = {"gaps": _candidate_profile_gaps(item), "queued_at": now}
+            _profile_enrichment_pending[code] = {"gaps": actionable_gaps, "queued_at": now, "reason": reason}
             accepted += 1
-        if len(_profile_enrichment_pending) >= 48:
+        if accepted >= max_accept or len(_profile_enrichment_pending) >= 48:
             break
+    if reason == "offline_no_path" and accepted:
+        _profile_enrichment_state["coverage_last_queued_at"] = now
+        _profile_enrichment_state["coverage_queued"] = int(_profile_enrichment_state.get("coverage_queued") or 0) + accepted
     _profile_enrichment_state["queued"] = len(_profile_enrichment_pending)
     if _profile_enrichment_pending and (_profile_enrichment_task is None or _profile_enrichment_task.done()):
         _profile_enrichment_task = asyncio.create_task(_run_profile_enrichment(dict(config)))
@@ -3761,6 +3779,19 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             )
         except Exception as exc:
             similarity_evaluation = {"error": str(exc), "evaluated": 0}
+        coverage_repairs = [
+            row for row in (similarity_evaluation.get("sample_misses") or [])
+            if isinstance(row, dict)
+            and row.get("reason") == "no_neighbor_path"
+            and {"actors", "categories", "title"} & set(row.get("profile_gaps") or [])
+        ]
+        similarity_meta["coverage_repair_candidates"] = len(coverage_repairs)
+        similarity_meta["coverage_repair_queued"] = _queue_profile_enrichment(
+            config,
+            coverage_repairs,
+            max_accept=12,
+            reason="offline_no_path",
+        )
         by_code = {_candidate_code(item): item for item in candidates if _candidate_code(item)}
         for neighbor in similarity_meta.get("items") or []:
             code = _candidate_code(neighbor)
@@ -3938,6 +3969,13 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "average_confidence": round(sum(float(item.get("neighbor_confidence") or 0) for item in scored if float(item.get("neighbor_score") or 0) > 0) / max(1, sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0)), 3),
                 "profile_gaps": dict(similarity_meta.get("profile_gaps") or {}),
                 "profile_enrichment_queued": int(similarity_meta.get("profile_enrichment_queued") or 0),
+                "coverage_repair_candidates": int(similarity_meta.get("coverage_repair_candidates") or 0),
+                "coverage_repair_queued": int(similarity_meta.get("coverage_repair_queued") or 0),
+                "coverage_repair_state": {
+                    "queued": int(_profile_enrichment_state.get("coverage_queued") or 0),
+                    "enriched": int(_profile_enrichment_state.get("coverage_enriched") or 0),
+                    "failed": int(_profile_enrichment_state.get("coverage_failed") or 0),
+                },
                 "feature_quality": dict(similarity_meta.get("feature_quality") or {}),
                 "offline_evaluation": similarity_evaluation,
             },
