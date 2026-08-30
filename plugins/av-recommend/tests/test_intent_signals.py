@@ -220,3 +220,9 @@ def test_coverage_repair_queue_is_bounded_actionable_and_cooled_down(monkeypatch
     assert list(backend._profile_enrichment_pending) == ["AAA-001", "AAA-002"]
     assert backend._profile_enrichment_state["coverage_queued"] == 2
     assert backend._queue_profile_enrichment({}, rows, max_accept=2, reason="offline_no_path") == 0
+
+    backend._profile_enrichment_pending = {}
+    backend._profile_enrichment_state["coverage_last_queued_at"] = 0.0
+    recent = backend.dt.datetime.now(backend.dt.timezone.utc).isoformat()
+    monkeypatch.setattr(backend, "_pool", lambda: {"items": {"OLD-001": {"profile_enrichment_at": recent}}})
+    assert backend._queue_profile_enrichment({}, rows, max_accept=2, reason="offline_no_path") == 0

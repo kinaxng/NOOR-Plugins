@@ -535,6 +535,15 @@ def _queue_profile_enrichment(config: dict[str, Any], items: list[dict[str, Any]
     if reason == "offline_no_path" and now - float(_profile_enrichment_state.get("coverage_last_queued_at") or 0) < 6 * 3600:
         return 0
     pool_items = (_pool().get("items") or {}) if reason == "offline_no_path" else {}
+    if reason == "offline_no_path":
+        latest_persisted_at = 0.0
+        for persisted in pool_items.values():
+            if not isinstance(persisted, dict):
+                continue
+            with contextlib.suppress(ValueError, TypeError):
+                latest_persisted_at = max(latest_persisted_at, dt.datetime.fromisoformat(str(persisted.get("profile_enrichment_at") or "")).timestamp())
+        if now - latest_persisted_at < 6 * 3600:
+            return 0
     accepted = 0
     for item in items:
         code = _candidate_code(item)
