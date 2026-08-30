@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -76,10 +77,29 @@ class ServiceToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class MediaInfoRecord(Base):
+    __tablename__ = "cloud115_mediainfo_records"
+
+    file_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    sha1: Mapped[str] = mapped_column(String(64), default="")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    json_path: Mapped[str] = mapped_column(Text, default="")
+    media: Mapped[dict] = mapped_column(JSON, default=dict)
+    probed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 _db_path = plugin_data_path("115", "state.db")
 _db_path.parent.mkdir(parents=True, exist_ok=True)
 _engine = create_engine(f"sqlite:///{_db_path}", connect_args={"timeout": 15}, pool_pre_ping=True)
 Session = sessionmaker(bind=_engine, expire_on_commit=False)
+_mediainfo_claim_lock = threading.Lock()
 
 
 def init_storage() -> None:
@@ -240,6 +260,7 @@ def service_token_valid(token_hash: str) -> bool:
 
 def media_dict(media: MediaFile) -> dict[str, Any]:
     record = get_strm(media.file_id)
+    info = get_mediainfo(media.file_id)
     return {
         "file_id": media.file_id,
         "sha1": media.sha1,
@@ -249,6 +270,78 @@ def media_dict(media: MediaFile) -> dict[str, Any]:
         "path": media.display_path,
         "strm_status": record.status if record else "pending",
         "strm_path": record.local_path if record else "",
-        "mediainfo_status": "pending",
+        "mediainfo_status": info.status if info else "pending",
         "emby_status": "pending",
     }
+
+
+def queue_mediainfo(media: MediaFile, *, schema_version: int = 1) -> tuple[MediaInfoRecord, bool]:
+    init_storage()
+    with Session.begin() as session:
+        record = session.get(MediaInfoRecord, media.file_id)
+        identity_matches = bool(record and record.sha1 == media.sha1 and record.size == media.size and record.schema_version == schema_version)
+        if record and identity_matches and record.status in {"queued", "running", "ready"}:
+            return record, False
+        if record is None:
+            record = MediaInfoRecord(file_id=media.file_id)
+            session.add(record)
+        record.sha1 = media.sha1
+        record.size = media.size
+        record.schema_version = schema_version
+        record.status = "queued"
+        record.attempts = 0
+        record.next_retry_at = None
+        record.error_message = ""
+        record.media = {}
+        record.json_path = ""
+        record.updated_at = utcnow()
+        return record, True
+
+
+def get_mediainfo(file_id: str) -> MediaInfoRecord | None:
+    init_storage()
+    with Session() as session:
+        return session.get(MediaInfoRecord, str(file_id))
+
+
+def next_mediainfo() -> MediaInfoRecord | None:
+    init_storage()
+    now = utcnow()
+    with _mediainfo_claim_lock:
+        with Session.begin() as session:
+            record = session.scalar(
+                select(MediaInfoRecord)
+                .where(MediaInfoRecord.status.in_(("queued", "retry")))
+                .where((MediaInfoRecord.next_retry_at.is_(None)) | (MediaInfoRecord.next_retry_at <= now))
+                .order_by(MediaInfoRecord.created_at.asc())
+                .limit(1)
+            )
+            if record:
+                record.status = "running"
+                record.updated_at = now
+            return record
+
+
+def update_mediainfo(file_id: str, **values: Any) -> MediaInfoRecord | None:
+    init_storage()
+    with Session.begin() as session:
+        record = session.get(MediaInfoRecord, str(file_id))
+        if not record:
+            return None
+        for key, value in values.items():
+            if hasattr(record, key):
+                setattr(record, key, value)
+        record.updated_at = utcnow()
+        return record
+
+
+def recover_interrupted_mediainfo() -> int:
+    init_storage()
+    with Session.begin() as session:
+        records = list(session.scalars(select(MediaInfoRecord).where(MediaInfoRecord.status == "running")).all())
+        for record in records:
+            record.status = "retry"
+            record.next_retry_at = utcnow()
+            record.error_message = "worker interrupted before completion"
+            record.updated_at = utcnow()
+        return len(records)

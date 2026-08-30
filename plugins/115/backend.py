@@ -11,12 +11,15 @@ from app.plugins.secrets import plugin_secret_store
 from .services.auth import code_challenge, poll_device_authorization, start_device_authorization
 from .services.client import Client115, Error115, PLUGIN_ID, normalize_file
 from .services.offline import add_urls, list_remote_tasks
-from .services.storage import create_task, find_duplicate, init_storage, list_media, list_tasks, media_dict, source_identity, task_dict, update_task, upsert_media, utcnow
+from .services.mediainfo import enqueue as enqueue_mediainfo, process_next as process_next_mediainfo
+from .services.storage import create_task, find_duplicate, init_storage, list_media, list_tasks, media_dict, recover_interrupted_mediainfo, source_identity, task_dict, update_task, upsert_media, utcnow
 from .services.strm import create_strm, is_media_file, resolve_stream as resolve_stream_service
 
 _auth_sessions: dict[str, dict[str, Any]] = {}
 _poll_task: asyncio.Task[None] | None = None
 _poll_stop: asyncio.Event | None = None
+_mediainfo_task: asyncio.Task[None] | None = None
+_mediainfo_stop: asyncio.Event | None = None
 
 
 def _public_account(data: dict[str, Any]) -> dict[str, Any]:
@@ -75,9 +78,18 @@ async def submit_download(config: dict[str, Any], payload: dict[str, Any]) -> di
 
 async def sync_offline_tasks(config: dict[str, Any]) -> dict[str, Any]:
     all_local = await asyncio.to_thread(list_tasks, active_only=False, limit=500)
-    local = [task for task in all_local if task.status in {"queued", "downloading"} or (task.status == "completed" and task.pipeline_status != "completed")]
+    pipeline_completed: list[str] = []
+    for task in all_local:
+        retry_due = task.pipeline_status != "failed" or not task.updated_at or (utcnow() - task.updated_at).total_seconds() >= 300
+        if task.status == "completed" and task.pipeline_status != "completed" and retry_due:
+            try:
+                await discover_completed_task(config, task)
+                pipeline_completed.append(task.info_hash)
+            except Exception as exc:
+                await asyncio.to_thread(update_task, task.info_hash, pipeline_status="failed", error_message=str(exc)[:1000])
+    local = [task for task in all_local if task.status in {"queued", "downloading"}]
     if not local:
-        return {"checked": 0, "updated": 0, "completed": []}
+        return {"checked": 0, "updated": 0, "completed": pipeline_completed}
     remote = await list_remote_tasks(Client115(config), max_pages=int(config.get("offline_poll_max_pages") or 5))
     by_hash = {item["info_hash"].lower(): item for item in remote}
     updated = 0
@@ -99,10 +111,11 @@ async def sync_offline_tasks(config: dict[str, Any]) -> dict[str, Any]:
         if current["status"] == "completed" and saved.pipeline_status != "completed":
             try:
                 await discover_completed_task(config, saved)
+                pipeline_completed.append(task.info_hash)
             except Exception as exc:
                 await asyncio.to_thread(update_task, task.info_hash, pipeline_status="failed", error_message=str(exc)[:1000])
                 raise
-    return {"checked": len(local), "updated": updated, "completed": completed}
+    return {"checked": len(local), "updated": updated, "completed": list(dict.fromkeys(completed + pipeline_completed))}
 
 
 async def _walk_task_root(config: dict[str, Any], root_id: str) -> list[dict[str, Any]]:
@@ -151,6 +164,8 @@ async def discover_completed_task(config: dict[str, Any], task: Any) -> list[str
             continue
         media, _created = await asyncio.to_thread(upsert_media, item, task_id=task.info_hash, display_path=item.get("display_path") or item["name"])
         await asyncio.to_thread(create_strm, config, item)
+        if config.get("mediainfo_enabled", True):
+            await asyncio.to_thread(enqueue_mediainfo, media)
         detected.append(media.file_id)
     await asyncio.to_thread(update_task, task.info_hash, detected_file_ids=detected, pipeline_status="completed", error_message="")
     return detected
@@ -179,23 +194,49 @@ async def _poll_loop(config: dict[str, Any]) -> None:
             pass
 
 
+async def _mediainfo_loop(config: dict[str, Any]) -> None:
+    global _mediainfo_stop
+    _mediainfo_stop = asyncio.Event()
+    while not _mediainfo_stop.is_set():
+        worked = False
+        if config.get("mediainfo_enabled", True):
+            concurrency = max(1, min(int(config.get("mediainfo_concurrency") or 1), 4))
+            results = await asyncio.gather(*(process_next_mediainfo(config) for _ in range(concurrency)), return_exceptions=True)
+            worked = any(result is not None and not isinstance(result, Exception) for result in results)
+        try:
+            await asyncio.wait_for(_mediainfo_stop.wait(), timeout=2 if worked else 10)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def start_background(config: dict[str, Any]) -> None:
-    global _poll_task
+    global _poll_task, _mediainfo_task
     init_storage()
+    await asyncio.to_thread(recover_interrupted_mediainfo)
     if not _poll_task or _poll_task.done():
         _poll_task = asyncio.create_task(_poll_loop(dict(config)))
+    if not _mediainfo_task or _mediainfo_task.done():
+        _mediainfo_task = asyncio.create_task(_mediainfo_loop(dict(config)))
 
 
 async def stop_background() -> None:
-    global _poll_task, _poll_stop
+    global _poll_task, _poll_stop, _mediainfo_task, _mediainfo_stop
     if _poll_stop:
         _poll_stop.set()
     if _poll_task:
         _poll_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await _poll_task
+    if _mediainfo_stop:
+        _mediainfo_stop.set()
+    if _mediainfo_task:
+        _mediainfo_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _mediainfo_task
     _poll_task = None
     _poll_stop = None
+    _mediainfo_task = None
+    _mediainfo_stop = None
 
 
 async def handle_action(action: str, config: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
