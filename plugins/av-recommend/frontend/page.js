@@ -182,6 +182,10 @@ function fmtPool(total, today) {
   return `${base}+${inc}`
 }
 
+function fmtCount(value) {
+  return new Intl.NumberFormat('zh-CN', { notation: Number(value || 0) >= 10000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(Number(value || 0))
+}
+
 export async function mount(root, sdk) {
   const state = {
     activeView: 'latest',
@@ -189,6 +193,9 @@ export async function mount(root, sdk) {
     loading: false,
     error: '',
     data: null,
+    coreData: null,
+    coreLoading: false,
+    coreError: '',
     activePanel: null,
     resourceSync: { active: false, count: 0, updated: false },
   }
@@ -234,6 +241,7 @@ export async function mount(root, sdk) {
         state.activeView = value
         if (value === 'core') {
           render()
+          loadCore()
           return
         }
         if (state.sourceMode === value) {
@@ -245,6 +253,83 @@ export async function mount(root, sdk) {
       }
       modeWrap.appendChild(btn)
     }
+  }
+
+  function renderCorePage() {
+    profile.innerHTML = ''
+    if (state.coreLoading && !state.coreData) {
+      profile.innerHTML = '<div class="av-rec-corelab-loading"><i></i><strong>正在读取 Intelligence Core</strong><span>汇总知识图谱、质量、学习与运行状态…</span></div>'
+      return
+    }
+    if (state.coreError && !state.coreData) {
+      profile.innerHTML = `<div class="av-rec-corelab-loading is-error"><strong>Core 暂时不可用</strong><span>${escapeHtml(state.coreError)}</span></div>`
+      return
+    }
+    const core = state.coreData || {}
+    const entities = core.entities || {}
+    const edges = core.edges || {}
+    const quality = core.work_profile_quality || {}
+    const resources = core.resource_coverage || {}
+    const resourceQuality = resources.quality || {}
+    const mappings = core.actor_mappings || {}
+    const similarity = core.work_similarity || {}
+    const featureQuality = similarity.feature_quality || {}
+    const edgeQuality = similarity.edge_quality || {}
+    const learning = core.preference_learning || {}
+    const outcomes = learning.outcomes || {}
+    const search = core.search_intent || {}
+    const refresh = core.refresh || {}
+    const refreshCounts = refresh.counts || {}
+    const entityTotal = Object.values(entities).reduce((sum, value) => sum + Number(value || 0), 0)
+    const edgeTotal = Object.values(edges).reduce((sum, value) => sum + Number(value || 0), 0)
+    const graphCoverage = Number(similarity.graph_coverage_percent || 0)
+    const mappedActors = Number(similarity.mapped_actor_feature_count || 0)
+    const fallbackActors = Number(similarity.fallback_actor_feature_count || 0)
+    const mappedRate = mappedActors + fallbackActors ? mappedActors / (mappedActors + fallbackActors) * 100 : 0
+    const statusText = similarity.rebuilding ? '关系图重建中' : Number(refreshCounts.queued || 0) + Number(refreshCounts.running || 0) > 0 ? '后台情报更新中' : '全部系统就绪'
+    const fmtDate = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚无记录'
+    const bars = [
+      ['标题可识别', quality.title?.percent || 0],
+      ['演员结构', quality.actors?.percent || 0],
+      ['类型语义', quality.categories?.percent || 0],
+      ['封面情报', quality.cover?.percent || 0],
+      ['完整画像', quality.complete?.percent || 0],
+      ['资源新鲜度', resourceQuality.freshness_rate || 0],
+    ]
+    const capability = (index, title, desc, value, stateText = 'ACTIVE') => `<article><i>${index}</i><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(desc)}</span></div><em>${escapeHtml(value)}</em><small>${stateText}</small></article>`
+    profile.innerHTML = `
+      <section class="av-rec-corelab-hero">
+        <div class="av-rec-corelab-hero-copy"><span>NOOR KNOWLEDGE &amp; LEARNING INFRASTRUCTURE</span><h2>Intelligence Core</h2><p>把分散的媒体、人物、语义、资源和行为事实整理为可追溯的长期知识，再向 NOOR 的每个模块提供统一智能。</p><div class="av-rec-corelab-status"><i></i><strong>${escapeHtml(statusText)}</strong><span>最近学习 ${escapeHtml(fmtDate(core.last_learned_at))}</span></div></div>
+        <div class="av-rec-corelab-graph-orbit" style="--coverage:${Math.max(0, Math.min(100, graphCoverage)) * 3.6}deg"><div><strong>${graphCoverage.toFixed(1)}%</strong><span>关系图覆盖</span></div><i></i><i></i><i></i></div>
+        <div class="av-rec-corelab-hero-metrics"><div><strong>${fmtCount(core.work_profiles || 0)}</strong><span>标准作品画像</span></div><div><strong>${fmtCount(entityTotal)}</strong><span>知识实体</span></div><div><strong>${fmtCount(edgeTotal)}</strong><span>语义关系</span></div><div><strong>${fmtCount(core.resource_observations || 0)}</strong><span>资源观测</span></div></div>
+      </section>
+      <section class="av-rec-corelab-section"><header><div><span>01 / FOUNDATION</span><h3>知识基础</h3></div><p>Core 保存的不是页面缓存，而是具有类型、来源和关系的可复用事实。</p></header>
+        <div class="av-rec-corelab-foundation">
+          <div class="av-rec-corelab-entity-cloud">${Object.entries(entities).sort((a,b)=>Number(b[1])-Number(a[1])).map(([key,value])=>`<span><strong>${fmtCount(value)}</strong><em>${escapeHtml(key.replaceAll('_',' '))}</em></span>`).join('')}</div>
+          <div class="av-rec-corelab-ledger"><div><span>关系种类</span><strong>${Object.keys(edges).length}</strong><em>${fmtCount(edgeTotal)} 条边</em></div><div><span>演员身份字典</span><strong>${fmtCount(mappings.identity_count || 0)}</strong><em>${fmtCount(mappings.alias_count || 0)} 个别名</em></div><div><span>学习别名</span><strong>${fmtCount(mappings.learned_alias_count || 0)}</strong><em>${fmtCount(mappings.alias_candidate_count || 0)} 个候选待验证</em></div><div><span>异常记录</span><strong>${fmtCount(core.anomalies || 0)}</strong><em>保留供质量审计</em></div></div>
+        </div>
+      </section>
+      <section class="av-rec-corelab-section"><header><div><span>02 / CAPABILITIES</span><h3>核心能力</h3></div><p>能力按输入、推理和输出职责拆分，每项都由可观测数据支撑。</p></header>
+        <div class="av-rec-corelab-capabilities">
+          ${capability('A1','实体统一','番号、演员别名与来源记录归并为稳定身份',fmtCount(mappings.identity_count || 0))}
+          ${capability('A2','语义画像','标题分词、类型、标签与人物特征形成作品向量',fmtCount(similarity.feature_count || 0))}
+          ${capability('A3','关系召回','利用可信共享特征构建作品邻域',fmtCount(similarity.linked_work_count || 0))}
+          ${capability('A4','资源情报','跨来源保存可用性、新鲜度与版本属性',`${Number(resources.percent || 0).toFixed(1)}%`)}
+          ${capability('A5','偏好学习','从浏览、订阅、下载到入库形成结果链',fmtCount(core.preference_event_count || 0), outcomes.trials ? 'LEARNING' : 'OBSERVING')}
+          ${capability('A6','意图理解','组合搜索词与当前会话信号，不污染长期画像',fmtCount(search.event_count || 0), search.event_count ? 'ACTIVE' : 'STANDBY')}
+        </div>
+      </section>
+      <section class="av-rec-corelab-section av-rec-corelab-science"><header><div><span>03 / QUALITY</span><h3>数据质量与图谱可信度</h3></div><p>覆盖率只说明“有数据”，完整度、映射率和降噪结果共同决定数据是否可用于推理。</p></header>
+        <div class="av-rec-corelab-quality-bars">${bars.map(([label,value])=>`<div><span>${escapeHtml(label)}</span><strong>${Number(value).toFixed(1)}%</strong><i><b style="width:${Math.max(0,Math.min(100,Number(value)))}%"></b></i></div>`).join('')}</div>
+        <div class="av-rec-corelab-quality-grid"><div><span>可信关系</span><strong>${fmtCount(edgeQuality.retained_pairs || 0)}</strong><em>从 ${fmtCount(edgeQuality.evaluated_pairs || 0)} 个候选关系中保留</em></div><div><span>弱语义剔除</span><strong>${fmtCount(edgeQuality.pruned_semantic_only || 0)}</strong><em>避免仅凭标题词产生虚假邻居</em></div><div><span>演员身份映射</span><strong>${mappedRate.toFixed(1)}%</strong><em>${fmtCount(mappedActors)} 个 MDC-NG 身份特征</em></div><div><span>特征净化</span><strong>${fmtCount(Object.values(featureQuality).reduce((s,v)=>s+Number(v||0),0))}</strong><em>别名、番号前缀与操作词已隔离</em></div></div>
+      </section>
+      <section class="av-rec-corelab-section"><header><div><span>04 / LEARNING LOOP</span><h3>可验证学习闭环</h3></div><p>Core 区分行为信号和真实结果；样本不足时保持保护状态，不把偶然点击误当成长期偏好。</p></header>
+        <div class="av-rec-corelab-loop"><span><i>01</i><strong>观察</strong><em>${fmtCount(core.preference_event_count || 0)} 个行为事件</em></span><b></b><span><i>02</i><strong>形成假设</strong><em>${fmtCount(learning.recent_events || 0)} 个近期样本</em></span><b></b><span><i>03</i><strong>等待结果</strong><em>${fmtCount(outcomes.pending || 0)} 个尚未成熟</em></span><b></b><span><i>04</i><strong>验证更新</strong><em>${fmtCount(outcomes.verified || 0)} 个真实结果</em></span></div>
+        <div class="av-rec-corelab-trends"><div><span>近期上升演员</span><p>${(learning.rising_actors || []).slice(0,4).map(x=>escapeHtml(x.name)).join(' · ') || '等待更多行为样本'}</p></div><div><span>近期上升主题</span><p>${(learning.rising_categories || []).slice(0,6).map(x=>escapeHtml(x.name)).join(' · ') || '等待更多行为样本'}</p></div><div><span>验证策略</span><p>${Number(outcomes.trials || 0) < 12 ? `小样本保护 · ${fmtCount(outcomes.trials || 0)}/12 次试验` : `结果学习已启用 · ${Math.round(Number(outcomes.rate || 0)*100)}% 效用率`}</p></div></div>
+      </section>
+      <section class="av-rec-corelab-section"><header><div><span>05 / PROVENANCE &amp; RUNTIME</span><h3>来源与运行状态</h3></div><p>所有情报保留来源边界，后台任务只更新事实，不阻塞页面使用。</p></header>
+        <div class="av-rec-corelab-runtime"><div class="av-rec-corelab-providers">${Object.entries(resources.providers || {}).map(([name,count])=>`<div><i></i><span>${escapeHtml(name)}</span><strong>${fmtCount(count)}</strong><em>观测</em></div>`).join('') || '<div><span>暂无资源提供方</span></div>'}</div><div class="av-rec-corelab-runtime-state"><div><span>资源可用率</span><strong>${Number(resourceQuality.availability_rate || 0).toFixed(1)}%</strong></div><div><span>待刷新</span><strong>${fmtCount(core.resource_refresh_pending || 0)}</strong></div><div><span>后台队列</span><strong>${fmtCount(Number(refreshCounts.queued || 0)+Number(refreshCounts.running || 0))}</strong></div><div><span>图谱版本</span><strong>v${escapeHtml(similarity.version || '-')}</strong></div></div></div>
+      </section>`
   }
 
   function renderProfile() {
@@ -1076,10 +1161,29 @@ export async function mount(root, sdk) {
       ? '<strong>Intelligence Core</strong><span>查看 NOOR 如何理解媒体库、建立作品关系并从真实结果中持续学习</span>'
       : '<strong>AV 推荐中心</strong><span>根据 JavDB 最新动态、完整候选池、媒体库偏好和资源可用性生成推荐</span>'
     renderModes()
-    if (isCore) renderProfile()
+    if (isCore) renderCorePage()
     else {
       renderNotice()
       renderItems()
+    }
+  }
+
+  async function loadCore() {
+    if (state.coreLoading) return
+    state.coreLoading = true
+    state.coreError = ''
+    render()
+    try {
+      const [statsResponse, refreshResponse] = await Promise.all([
+        sdk.api.get('/knowledge/stats', { timeout: 15000 }),
+        sdk.api.get('/knowledge/resources/refresh/status', { timeout: 10000 }),
+      ])
+      state.coreData = { ...(statsResponse?.data || statsResponse || {}), refresh: refreshResponse?.data || refreshResponse || {} }
+    } catch (error) {
+      state.coreError = error?.response?.data?.detail || error?.message || '无法读取 Core 状态'
+    } finally {
+      state.coreLoading = false
+      if (state.activeView === 'core') render()
     }
   }
 
