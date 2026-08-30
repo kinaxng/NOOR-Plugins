@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 56
-PERSONALIZED_MODEL_VERSION = "personal-v56"
+RECOMMENDATION_ALGORITHM_VERSION = 57
+PERSONALIZED_MODEL_VERSION = "personal-v57"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -3116,6 +3116,16 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             continue
         topic_actor_ids = {str(row.get("identity") or "") for row in topic.get("actors") or [] if isinstance(row, dict) and row.get("identity")}
         topic_categories = {str(name) for name in topic.get("categories") or [] if str(name or "").strip()}
+        anchor = str(topic.get("anchor") or "")
+        relation_type = str(topic.get("relation_type") or "anchor")
+        relation_actor_identity = str(topic.get("relation_actor_identity") or "")
+        relation_category = str(topic.get("relation_category") or "")
+        if anchor and anchor not in candidate_categories:
+            continue
+        if relation_type == "actor_category" and relation_actor_identity and relation_actor_identity not in candidate_actor_ids:
+            continue
+        if relation_type == "category_pair" and relation_category and relation_category not in candidate_categories:
+            continue
         actor_matches = candidate_actor_ids & topic_actor_ids
         category_matches = candidate_categories & topic_categories
         signal_count = int(bool(actor_matches)) + min(2, len(category_matches))

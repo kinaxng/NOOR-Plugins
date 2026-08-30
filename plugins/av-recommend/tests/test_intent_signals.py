@@ -139,10 +139,36 @@ def test_v47_missing_structured_actor_uses_conservative_mdc_title_mention(monkey
     assert scored["score_breakdown"]["actor_preference"] > 0
 
 
+def test_topic_match_requires_the_labeled_anchor_and_relation() -> None:
+    backend = _backend()
+    profile = {
+        "codes": set(), "actor_identities": Counter(), "actors": Counter(),
+        "genres": Counter({"人妻": 3, "出轨": 2}), "tags": Counter(), "studios": Counter(),
+        "series": Counter(), "directors": Counter(), "title_traits": Counter(),
+        "semantic_terms": Counter(), "actor_category": Counter(), "category_pairs": Counter(),
+        "media_count": 3,
+    }
+    scored = backend._candidate_score(
+        {"code": "TOPIC-002", "title": "人妻出轨作品", "categories": ["人妻", "出轨"], "magnets_count": 1},
+        profile,
+        {},
+        {"interest_topics": [{
+            "id": "topic-2", "label": "剧情 · 中出", "anchor": "剧情",
+            "relation_type": "category_pair", "relation_category": "中出",
+            "categories": ["剧情", "中出", "人妻", "出轨"], "actors": [], "support": 20,
+            "strength": 0.4, "recent_strength": 0.4, "momentum": 0.0, "confidence": 0.8,
+        }]},
+    )
+
+    assert scored is not None
+    assert scored["score_breakdown"]["interest_topic"] == 0
+    assert not scored["interest_topic"]
+
+
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 56
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v56"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 57
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v57"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
