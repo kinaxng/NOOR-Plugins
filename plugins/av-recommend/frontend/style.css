@@ -1,4 +1,5 @@
 .av-rec-page{display:flex;flex-direction:column;gap:14px;min-height:100%;color:var(--color-text-primary,#fff)}
+.av-rec-profile[hidden],.av-rec-notice[hidden],.av-rec-grid[hidden]{display:none!important}
 .av-rec-topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:2px 0 4px}
 .av-rec-title{display:grid;gap:4px}.av-rec-title strong{font-size:20px;font-weight:850}.av-rec-title span{font-size:12px;color:var(--color-text-muted,rgba(255,255,255,.52))}
 .av-rec-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}.av-rec-modes{display:flex;align-items:center;gap:6px;padding:3px;border:1px solid rgba(255,255,255,.07);background:rgba(255,255,255,.035);border-radius:12px}.av-rec-mode{height:28px;padding:0 10px;border:0;border-radius:9px;background:transparent;color:var(--color-text-secondary,rgba(255,255,255,.72));font-size:12px;font-weight:750}.av-rec-mode:hover{background:rgba(255,255,255,.055)}.av-rec-mode.is-active{background:rgba(255,255,255,.105);color:#fff}
