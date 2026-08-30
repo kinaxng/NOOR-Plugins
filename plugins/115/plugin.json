@@ -1,0 +1,49 @@
+{
+  "id": "115",
+  "name": "115",
+  "version": "0.1.0",
+  "type": "downloader",
+  "description": "115 Open Platform 离线下载、稳定 STRM 与媒体情报流水线。",
+  "tags": ["115", "cloud", "downloader", "strm", "mediainfo"],
+  "capabilities": ["downloader", "network_outbound", "download_submit", "sidebar_page"],
+  "enabled_by_default": false,
+  "config_schema": {
+    "client_id": {"type": "string", "label": "115 Open Platform Client ID", "description": "在 115 开放平台注册应用后获得。"},
+    "access_token": {"type": "password", "label": "Access Token", "secret": true, "description": "由授权流程自动保存；不会返回前端。"},
+    "refresh_token": {"type": "password", "label": "Refresh Token", "secret": true, "description": "由授权流程自动保存并轮换；不会返回前端。"},
+    "offline_directory_id": {"type": "string", "label": "默认离线目录 ID", "default": "0"},
+    "strm_directory": {"type": "string", "label": "STRM incoming 目录", "placeholder": "/data/strm/incoming"},
+    "public_base_url": {"type": "string", "label": "NOOR 外部访问地址", "placeholder": "https://noor.example"},
+    "media_extensions": {"type": "string", "label": "媒体扩展名", "default": "mkv,mp4,avi,mov,ts,m2ts,wmv,flv,webm"},
+    "mediainfo_enabled": {"type": "boolean", "label": "生成后提取 MediaInfo", "default": true},
+    "mediainfo_concurrency": {"type": "number", "label": "MediaInfo 并发", "description": "默认 1；提高并发可能增加网盘风控风险。", "default": 1, "min": 1, "max": 4},
+    "api_min_interval": {"type": "number", "label": "API 最小请求间隔（秒）", "default": 1, "min": 0.2, "max": 10, "step": 0.2},
+    "timeout": {"type": "number", "label": "API 超时（秒）", "default": 20, "min": 5, "max": 60}
+  },
+  "default_config": {
+    "client_id": "",
+    "access_token": "",
+    "refresh_token": "",
+    "offline_directory_id": "0",
+    "strm_directory": "",
+    "public_base_url": "",
+    "media_extensions": "mkv,mp4,avi,mov,ts,m2ts,wmv,flv,webm",
+    "mediainfo_enabled": true,
+    "mediainfo_concurrency": 1,
+    "api_min_interval": 1,
+    "timeout": 20
+  },
+  "contributions": {
+    "sidebar": {"label": "115", "route": "/plugins/115", "icon": "icons/sidebar.svg"},
+    "downloader_capabilities": {
+      "accepts_public_magnet": true,
+      "accepts_private_tracker": false,
+      "accepts_http_torrent": true,
+      "accepts_http_url": true,
+      "accepts_ed2k": true
+    },
+    "icon": "icons/sidebar.svg"
+  },
+  "frontend": {"type": "module", "entry": "frontend/page.js", "style": "frontend/style.css"}
+}
+
