@@ -46,10 +46,10 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 72
+RECOMMENDATION_ALGORITHM_VERSION = 73
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
-RANKING_POLICY_VERSION = 59
+RANKING_POLICY_VERSION = 60
 PERSONALIZED_MODEL_VERSION = f"personal-v{RANKING_POLICY_VERSION}"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
