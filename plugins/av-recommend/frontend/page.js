@@ -184,6 +184,7 @@ function fmtPool(total, today) {
 
 export async function mount(root, sdk) {
   const state = {
+    activeView: 'latest',
     sourceMode: 'latest',
     loading: false,
     error: '',
@@ -224,11 +225,21 @@ export async function mount(root, sdk) {
     const modes = [
       ['latest', '最新推荐'],
       ['full', '完整推荐'],
+      ['core', 'Intelligence Core'],
     ]
     for (const [value, label] of modes) {
-      const btn = el('button', 'av-rec-mode' + (state.sourceMode === value ? ' is-active' : ''), label)
+      const btn = el('button', 'av-rec-mode' + (state.activeView === value ? ' is-active' : ''), label)
       btn.onclick = () => {
-        if (state.sourceMode === value) return
+        if (state.activeView === value) return
+        state.activeView = value
+        if (value === 'core') {
+          render()
+          return
+        }
+        if (state.sourceMode === value) {
+          render()
+          return
+        }
         state.sourceMode = value
         load(false)
       }
@@ -1056,10 +1067,20 @@ export async function mount(root, sdk) {
   }
 
   function render() {
+    const isCore = state.activeView === 'core'
+    profile.hidden = !isCore
+    notice.hidden = isCore
+    grid.hidden = isCore
+    refreshBtn.style.display = isCore ? 'none' : ''
+    title.innerHTML = isCore
+      ? '<strong>Intelligence Core</strong><span>查看 NOOR 如何理解媒体库、建立作品关系并从真实结果中持续学习</span>'
+      : '<strong>AV 推荐中心</strong><span>根据 JavDB 最新动态、完整候选池、媒体库偏好和资源可用性生成推荐</span>'
     renderModes()
-    renderProfile()
-    renderNotice()
-    renderItems()
+    if (isCore) renderProfile()
+    else {
+      renderNotice()
+      renderItems()
+    }
   }
 
   function clearResourcePoll() {
