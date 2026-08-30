@@ -493,6 +493,7 @@ async def _run_profile_enrichment(config: dict[str, Any]) -> None:
                 for code, data, error in loaded:
                     item = items.get(code) if isinstance(items.get(code), dict) else {"code": code, "number": code}
                     item["profile_enrichment_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+                    item["profile_enrichment_reason"] = str(batch_jobs.get(code, {}).get("reason") or "candidate_gap")
                     if not data:
                         item["profile_enrichment_error"] = error or "未返回作品详情"
                         failed += 1
@@ -567,6 +568,19 @@ def _queue_profile_enrichment(config: dict[str, Any], items: list[dict[str, Any]
     if _profile_enrichment_pending and (_profile_enrichment_task is None or _profile_enrichment_task.done()):
         _profile_enrichment_task = asyncio.create_task(_run_profile_enrichment(dict(config)))
     return accepted
+
+
+def _profile_enrichment_public_state() -> dict[str, Any]:
+    state = dict(_profile_enrichment_state)
+    coverage_rows = [
+        item for item in ((_pool().get("items") or {}).values())
+        if isinstance(item, dict) and item.get("profile_enrichment_reason") == "offline_no_path"
+    ]
+    if coverage_rows:
+        state["coverage_queued"] = max(int(state.get("coverage_queued") or 0), len(coverage_rows))
+        state["coverage_enriched"] = max(int(state.get("coverage_enriched") or 0), sum(not item.get("profile_enrichment_error") for item in coverage_rows))
+        state["coverage_failed"] = max(int(state.get("coverage_failed") or 0), sum(bool(item.get("profile_enrichment_error")) for item in coverage_rows))
+    return state
 
 
 def _subscription_codes() -> set[str]:
@@ -3899,6 +3913,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     display_resource_warnings = await _enrich_recommendation_resources(config, scored)
     if display_resource_warnings:
         warnings.extend(display_resource_warnings)
+    enrichment_public_state = _profile_enrichment_public_state()
     result = {
         "ok": True,
         "generated_at": _now_ms(),
@@ -3981,9 +3996,9 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "coverage_repair_candidates": int(similarity_meta.get("coverage_repair_candidates") or 0),
                 "coverage_repair_queued": int(similarity_meta.get("coverage_repair_queued") or 0),
                 "coverage_repair_state": {
-                    "queued": int(_profile_enrichment_state.get("coverage_queued") or 0),
-                    "enriched": int(_profile_enrichment_state.get("coverage_enriched") or 0),
-                    "failed": int(_profile_enrichment_state.get("coverage_failed") or 0),
+                    "queued": int(enrichment_public_state.get("coverage_queued") or 0),
+                    "enriched": int(enrichment_public_state.get("coverage_enriched") or 0),
+                    "failed": int(enrichment_public_state.get("coverage_failed") or 0),
                 },
                 "feature_quality": dict(similarity_meta.get("feature_quality") or {}),
                 "offline_evaluation": similarity_evaluation,
@@ -4088,7 +4103,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
     if action == "refresh_cover":
         return await _refresh_candidate_cover(payload.get("code") or payload.get("number"))
     if action == "candidate_pool":
-        return {"ok": True, "pool": _candidate_pool_stats(_pool()), "profile_enrichment": dict(_profile_enrichment_state)}
+        return {"ok": True, "pool": _candidate_pool_stats(_pool()), "profile_enrichment": _profile_enrichment_public_state()}
     if action == "feedback":
         code = _norm_code(payload.get("code"))
         kind = str(payload.get("kind") or "ignore").strip()

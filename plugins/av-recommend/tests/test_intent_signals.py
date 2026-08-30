@@ -226,3 +226,12 @@ def test_coverage_repair_queue_is_bounded_actionable_and_cooled_down(monkeypatch
     recent = backend.dt.datetime.now(backend.dt.timezone.utc).isoformat()
     monkeypatch.setattr(backend, "_pool", lambda: {"items": {"OLD-001": {"profile_enrichment_at": recent}}})
     assert backend._queue_profile_enrichment({}, rows, max_accept=2, reason="offline_no_path") == 0
+
+    backend._profile_enrichment_state.update({"coverage_queued": 0, "coverage_enriched": 0, "coverage_failed": 0})
+    monkeypatch.setattr(backend, "_pool", lambda: {"items": {
+        "AAA-001": {"profile_enrichment_reason": "offline_no_path", "profile_enrichment_error": ""},
+        "AAA-002": {"profile_enrichment_reason": "offline_no_path", "profile_enrichment_error": "timeout"},
+        "AAA-003": {"profile_enrichment_reason": "candidate_gap", "profile_enrichment_error": ""},
+    }})
+    public = backend._profile_enrichment_public_state()
+    assert (public["coverage_queued"], public["coverage_enriched"], public["coverage_failed"]) == (2, 1, 1)
