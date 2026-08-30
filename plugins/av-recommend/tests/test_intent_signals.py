@@ -114,10 +114,35 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
     assert actor_factor["evidence"][0]["name"] == backend.canonical_actor_name("吉泽明步")
 
 
+def test_v47_missing_structured_actor_uses_conservative_mdc_title_mention(monkeypatch) -> None:
+    backend = _backend()
+    identity = "mdc-ng:actor-1"
+    monkeypatch.setattr(backend, "actor_mentions", lambda value, limit=4: [{
+        "name": "吉泽明步", "identity": identity, "alias": "吉沢明歩", "source": "mdc-ng-title",
+    }] if "吉沢明歩" in value else [])
+    monkeypatch.setattr(backend, "canonical_actor_name", lambda value: "吉泽明步" if value else "")
+    monkeypatch.setattr(backend, "actor_identity_key", lambda value: identity if value else "")
+    profile = {
+        "codes": set(), "actor_identities": Counter({identity: 6}), "actors": Counter(),
+        "genres": Counter(), "tags": Counter(), "studios": Counter(), "series": Counter(),
+        "directors": Counter(), "title_traits": Counter(), "semantic_terms": Counter(),
+        "actor_category": Counter(), "category_pairs": Counter(), "media_count": 20,
+    }
+    scored = backend._candidate_score({
+        "code": "AAA-047", "title": "吉沢明歩 最新作品", "actors": [],
+        "magnets_count": 1, "release_date": "2026-01-01",
+    }, profile, {}, {})
+    assert scored is not None
+    assert scored["actors"] == ["吉泽明步"]
+    assert scored["actor_inference"]["source"] == "mdc-ng-title"
+    assert "MDC-NG 标题识别演员" in scored["reasons"]
+    assert scored["score_breakdown"]["actor_preference"] > 0
+
+
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 46
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v46"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 47
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v47"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000

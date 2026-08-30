@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens, work_similarity_recall_evaluation, work_similarity_status, work_similarity_temporal_backtest
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, actor_mentions, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens, work_similarity_recall_evaluation, work_similarity_status, work_similarity_temporal_backtest
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 46
-PERSONALIZED_MODEL_VERSION = "personal-v46"
+RECOMMENDATION_ALGORITHM_VERSION = 47
+PERSONALIZED_MODEL_VERSION = "personal-v47"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -2911,7 +2911,12 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         _record_filter(diagnostics, item, code, "disliked", "用户已标记不感兴趣")
         return None
     in_library = code in profile.get("codes", set()) or bool((item.get("library") or {}).get("in_library") if isinstance(item.get("library"), dict) else False)
-    actors = _unique_names([canonical_actor_name(name) for name in (item.get("actors") or [])], 12)
+    raw_actors = list(item.get("actors") or [])
+    inferred_actor_mentions: list[dict[str, str]] = []
+    if not raw_actors:
+        inferred_actor_mentions = actor_mentions(" ".join(str(item.get(key) or "") for key in ("title", "original_title", "display_title")), limit=4)
+        raw_actors = [row["name"] for row in inferred_actor_mentions]
+    actors = _unique_names([canonical_actor_name(name) for name in raw_actors], 12)
     actor_identities = [actor_identity_key(name) for name in actors]
     base_categories = _unique_names([canonical_preference_category(name) for name in (item.get("categories") or [])], 16)
     title_profile = _ensure_title_profile(item)
@@ -2981,6 +2986,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         personalized_score += boost
         actor_preference_score += boost
         reasons.append(f"{'演员偏好' if best_count > 1 else '演员线索'}：{best_name} 已有 {best_count} 部")
+        if inferred_actor_mentions:
+            reasons.append("MDC-NG 标题识别演员")
         if len(actor_hits) >= 2:
             boost = min(8, len(actor_hits) * 2.5)
             score += boost
@@ -3531,6 +3538,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "release_date": release,
         "release_freshness": freshness,
         "actors": actors[:6],
+        "actor_inference": {"source": "mdc-ng-title", "mentions": inferred_actor_mentions} if inferred_actor_mentions else {},
         "categories": categories[:8],
         "title_traits": title_traits[:8],
         "title_profile": {

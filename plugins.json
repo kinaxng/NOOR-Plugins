@@ -2,7 +2,7 @@
   "name": "NOOR Official Plugins",
   "repository": "https://github.com/kinaxng/NOOR-Plugins",
   "plugins": [
-    {"id":"av-recommend","name":"推荐中心","version":"1.36.0","description":"融合 MDC-NG 演员身份、历史时间回测门控、多尺度偏好、扩展 Core 传播与影子评估的推荐中心。","source_dir":"plugins/av-recommend"},
+    {"id":"av-recommend","name":"推荐中心","version":"1.37.0","description":"融合 MDC-NG 演员身份、历史时间回测门控、多尺度偏好、扩展 Core 传播与影子评估的推荐中心。","source_dir":"plugins/av-recommend"},
     {"id":"avdb","name":"AVDB","version":"0.1.0","description":"通过独立 AVDB API 搜索影片资源。","source_dir":"plugins/avdb"},
     {"id":"gfriends","name":"Gfriends","version":"0.1.0","description":"演员头像库辅助工具。","source_dir":"plugins/gfriends"},
     {"id":"javdb","name":"JavDB","version":"0.1.0","description":"JavDB 元数据、搜索、磁链与图谱接入。","source_dir":"plugins/javdb"},
