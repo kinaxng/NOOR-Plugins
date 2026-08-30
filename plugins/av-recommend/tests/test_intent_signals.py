@@ -111,8 +111,8 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 40
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v40"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 41
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v41"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -187,6 +187,50 @@ def test_v32_shadow_evaluation_promotes_only_with_confident_shared_outcomes() ->
 def test_mdc_ng_actor_aliases_share_one_recommendation_identity() -> None:
     backend = _backend()
     assert backend.actor_identity_key("吉泽明步") == backend.actor_identity_key("吉沢明歩")
+
+
+def test_v41_local_diversity_separates_mdc_ng_aliases_and_reports_adjacency() -> None:
+    backend = _backend()
+    rows = [
+        {"code": "AAA-001", "score": 90, "personalized_score": 40, "actors": ["吉泽明步"], "categories": ["人妻"]},
+        {"code": "AAA-002", "score": 89, "personalized_score": 40, "actors": ["吉沢明歩"], "categories": ["人妻"]},
+        {"code": "AAA-003", "score": 87, "personalized_score": 36, "actors": ["葵つかさ"], "categories": ["ドラマ"]},
+    ]
+    ranked = backend._diversify_recommendations(rows)
+    assert [row["code"] for row in ranked[:2]] == ["AAA-001", "AAA-003"]
+    metrics = backend._recommendation_diversity_metrics(ranked)
+    assert metrics["adjacent"]["actor_repeats"]["count"] == 0
+    assert metrics["adjacent"]["actor_identity_source"] == "mdc-ng"
+    assert ranked[1]["diversity_adjustment"]["adjacent"] == 0
+
+
+def test_v41_transition_model_collapses_funnel_stages_and_waits_for_support() -> None:
+    backend = _backend()
+    now = 1_800_000_000_000
+    actor_a = backend.actor_identity_key("吉泽明步")
+    actor_b = backend.actor_identity_key("葵つかさ")
+
+    def row(code: str, offset: int, actor: str, category: str, event_type: str = "detail_view") -> dict:
+        return {"code": code, "created_at": now - (70 - offset) * 60_000, "weight": 1, "event_type": event_type, "actors": [actor], "categories": [category]}
+
+    sparse = {"session_intents": [row("A-1", 0, actor_a, "人妻"), row("B-1", 10, actor_b, "剧情"), row("A-2", 20, actor_a, "人妻")]}
+    assert backend._session_transition_model(sparse, now_ms=now)["status"] == "collecting"
+
+    store = {"session_intents": [
+        row("A-1", 0, actor_a, "人妻"),
+        row("A-1", 1, actor_a, "人妻", "download_intent"),
+        row("B-1", 10, actor_b, "剧情"),
+        row("A-2", 20, actor_a, "人妻"),
+        row("B-2", 30, actor_b, "剧情"),
+        row("A-3", 40, actor_a, "人妻"),
+        row("C-1", 50, backend.actor_identity_key("波多野结衣"), "巨乳"),
+        row("A-4", 60, actor_a, "人妻"),
+    ]}
+    model = backend._session_transition_model(store, now_ms=now)
+    assert model["status"] == "active"
+    assert model["event_count"] == 7
+    assert model["evidence"][f"actor:{actor_b}"]["support"] == 2
+    assert model["predictions"][f"actor:{actor_b}"] > model["predictions"].get("category:巨乳", 0)
 
 
 def test_coverage_repair_queue_is_bounded_actionable_and_cooled_down(monkeypatch) -> None:

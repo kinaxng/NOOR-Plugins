@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 40
-PERSONALIZED_MODEL_VERSION = "personal-v40"
+RECOMMENDATION_ALGORITHM_VERSION = 41
+PERSONALIZED_MODEL_VERSION = "personal-v41"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -909,6 +909,91 @@ def _session_intent_summary(store: dict[str, Any], *, now_ms: int | None = None)
         "categories": dict(categories),
         "topics": dict(topics),
         "revision": hashlib.sha256(revision_source.encode("utf-8")).hexdigest()[:16],
+    }
+
+
+def _session_transition_model(store: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    """Learn conservative next-interest transitions from ordered interactions.
+
+    Events for one work often represent funnel stages rather than a new choice,
+    so consecutive rows with the same code are collapsed before transitions are
+    counted.  Predictions remain observational until the same edge has at least
+    two examples and its source has at least three outgoing observations.
+    """
+    now = int(now_ms or _now_ms())
+    rows = sorted((row for row in store.get("session_intents") or [] if isinstance(row, dict)), key=lambda row: int(row.get("created_at") or 0))
+    retained: list[dict[str, Any]] = []
+    for row in rows:
+        created_at = int(row.get("created_at") or 0)
+        if not created_at or now - created_at > SESSION_INTENT_MAX_AGE_MS:
+            continue
+        normalized = {
+            **row,
+            "created_at": created_at,
+            "actors": list(dict.fromkeys(str(value) for value in row.get("actors") or [] if str(value))),
+            "categories": list(dict.fromkeys(canonical_preference_category(value) for value in row.get("categories") or [] if canonical_preference_category(value))),
+            "topic_id": str(row.get("topic_id") or ""),
+        }
+        if retained and retained[-1].get("code") == normalized.get("code"):
+            prior = retained[-1]
+            prior["created_at"] = max(int(prior["created_at"]), created_at)
+            prior["weight"] = max(float(prior.get("weight") or 0), float(normalized.get("weight") or 0))
+            prior["actors"] = list(dict.fromkeys([*(prior.get("actors") or []), *normalized["actors"]]))
+            prior["categories"] = list(dict.fromkeys([*(prior.get("categories") or []), *normalized["categories"]]))
+            prior["topic_id"] = normalized["topic_id"] or prior.get("topic_id") or ""
+        else:
+            retained.append(normalized)
+
+    def tokens(row: dict[str, Any]) -> list[str]:
+        values = [*(f"actor:{value}" for value in row.get("actors") or []), *(f"category:{value}" for value in row.get("categories") or [])]
+        if row.get("topic_id"):
+            values.append(f"topic:{row['topic_id']}")
+        return values[:20]
+
+    edge_counts: dict[str, Counter] = defaultdict(Counter)
+    source_counts: Counter = Counter()
+    eligible_pairs = 0
+    for left, right in zip(retained, retained[1:]):
+        gap = int(right["created_at"]) - int(left["created_at"])
+        if gap <= 0 or gap > 6 * 60 * 60 * 1000:
+            continue
+        sources, targets = tokens(left), tokens(right)
+        if not sources or not targets:
+            continue
+        eligible_pairs += 1
+        for source in sources:
+            source_counts[source] += 1
+            edge_counts[source].update(targets)
+
+    current_sources = tokens(retained[-1]) if retained else []
+    predictions: Counter = Counter()
+    evidence: dict[str, dict[str, Any]] = {}
+    for source in current_sources:
+        source_support = int(source_counts.get(source) or 0)
+        if source_support < 3:
+            continue
+        for target, support in edge_counts.get(source, {}).items():
+            if support < 2 or target in current_sources:
+                continue
+            conditional = support / source_support
+            reliability = support / (support + 3)
+            value = conditional * reliability
+            predictions[target] = max(predictions[target], value)
+            current = evidence.get(target)
+            if current is None or value > float(current.get("score") or 0):
+                evidence[target] = {"source": source, "support": support, "source_support": source_support, "confidence": round(reliability, 3), "score": round(value, 4)}
+    ranked = predictions.most_common(12)
+    return {
+        "version": 1,
+        "status": "active" if ranked else "collecting",
+        "event_count": len(retained),
+        "eligible_pairs": eligible_pairs,
+        "current_sources": current_sources,
+        "predictions": dict(ranked),
+        "evidence": {target: evidence[target] for target, _score in ranked},
+        "minimum_edge_support": 2,
+        "minimum_source_support": 3,
+        "revision": hashlib.sha256(f"{len(retained)}:{eligible_pairs}:{retained[-1]['created_at'] if retained else 0}".encode()).hexdigest()[:16],
     }
 
 
@@ -2567,6 +2652,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     liked_topics: Counter = feedback.get("liked_topics") or Counter()
     disliked_topics: Counter = feedback.get("disliked_topics") or Counter()
     session_intent: dict[str, Any] = feedback.get("session_intent") or {}
+    transition_model: dict[str, Any] = feedback.get("transition_model") or {}
     search_intent: dict[str, Any] = feedback.get("search_intent") or {}
     context_gate: dict[str, Any] = feedback.get("context_gate") or {}
     exposure_penalties: dict[str, float] = feedback.get("exposure_penalties") or {}
@@ -2607,6 +2693,8 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     freshness_score = 0.0
     interest_topic_score = 0.0
     session_intent_score = 0.0
+    sequence_transition_score = 0.0
+    sequence_transition_matches: list[dict[str, Any]] = []
     search_intent_score = 0.0
     context_mixture_penalty = 0.0
     context_alignment = 0.0
@@ -2831,6 +2919,29 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         personalized_score += session_intent_score
         trend_preference_score += session_intent_score
         reasons.append("当前兴趣方向")
+
+    if transition_model.get("status") == "active":
+        candidate_transition_tokens = {
+            *(f"actor:{identity}" for identity in actor_identities if identity),
+            *(f"category:{category}" for category in candidate_categories if category),
+            *([f"topic:{session_topic_id}"] if session_topic_id else []),
+        }
+        for token in candidate_transition_tokens:
+            strength = float((transition_model.get("predictions") or {}).get(token) or 0)
+            if strength <= 0:
+                continue
+            sequence_transition_matches.append({
+                "target": token,
+                "strength": round(strength, 4),
+                **dict((transition_model.get("evidence") or {}).get(token) or {}),
+            })
+        sequence_transition_matches.sort(key=lambda row: float(row.get("strength") or 0), reverse=True)
+        sequence_transition_score = min(2.4, sum(float(row.get("strength") or 0) for row in sequence_transition_matches[:3]) * 3.0)
+        if sequence_transition_score >= 0.25:
+            score += sequence_transition_score
+            personalized_score += sequence_transition_score
+            trend_preference_score += sequence_transition_score
+            reasons.append("近期兴趣自然延伸")
 
     search_actor_strength = sum(float((search_intent.get("actors") or {}).get(identity) or 0) for identity in actor_identities)
     search_category_strength = sum(float((search_intent.get("categories") or {}).get(category) or 0) * _generic_category_factor(category) for category in candidate_categories)
@@ -3113,6 +3224,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         {"type": "trend", "label": "近期趋势", "score": round(trend_preference_score, 1)},
         {"type": "topic", "label": "组合兴趣主题", "score": round(interest_topic_score, 1), "evidence": matched_interest_topic or {}},
         {"type": "session", "label": "当前兴趣方向", "score": round(session_intent_score, 1)},
+        {"type": "transition", "label": "近期兴趣转移", "score": round(sequence_transition_score, 1), "evidence": sequence_transition_matches[:3]},
         {"type": "search", "label": "当前搜索方向", "score": round(search_intent_score, 1), "evidence": matched_search_combinations[:3]},
         {"type": "context", "label": "长期/即时混合门控", "score": round(-context_mixture_penalty, 1), "evidence": {"alignment": round(context_alignment, 3), **context_gate}},
         {"type": "outcome", "label": "入库结果校准", "score": round(outcome_calibration_score, 1)},
@@ -3167,6 +3279,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "interest_topic": matched_interest_topic or {},
         "interest_topic_hypothesis": interest_topic_hypothesis,
         "search_intent_matches": matched_search_combinations[:3],
+        "sequence_transition_matches": sequence_transition_matches[:3],
         "context_mixture": {"alignment": round(context_alignment, 3), "penalty": round(context_mixture_penalty, 2), "gate": float(context_gate.get("gate") or 0)},
         "exposure_fatigue": exposure_fatigue.get(code) or {},
         "neighbor_score": round(neighbor_score, 3),
@@ -3188,6 +3301,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "trend": round(trend_preference_score, 1),
             "interest_topic": round(interest_topic_score, 1),
             "session_intent": round(session_intent_score, 1),
+            "sequence_transition": round(sequence_transition_score, 1),
             "search_intent": round(search_intent_score, 1),
             "context_mixture": round(-context_mixture_penalty, 1),
             "outcomes": round(outcome_calibration_score, 1),
@@ -3462,7 +3576,43 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
             category_penalty = sum(min(3, category_seen.get(category, 0)) * 1.15 for category in categories[:3])
             maker_penalty = 2.75 * (maker_seen.get(maker, 0) ** 0.8) if maker else 0.0
             series_penalty = 5.0 * series_seen.get(series, 0) if series else 0.0
-            penalty = actor_penalty + category_penalty + maker_penalty + series_penalty
+            # Global exposure diversity does not guarantee a pleasant local
+            # sequence.  Use the last three cards as a separate, bounded
+            # window so aliases that resolve to one MDC-NG identity cannot sit
+            # next to each other merely because their labels differ.
+            recent = selected[-3:]
+            immediate = recent[-1] if recent else {}
+            immediate_actors = {actor_identity_key(x) for x in immediate.get("actors") or [] if actor_identity_key(x)}
+            recent_actors = {
+                actor_identity_key(x)
+                for row in recent
+                for x in row.get("actors") or []
+                if actor_identity_key(x)
+            }
+            immediate_categories = {
+                canonical_preference_category(x)
+                for x in immediate.get("categories") or []
+                if _generic_category_factor(x) >= 0.5
+            }
+            canonical_categories = {
+                canonical_preference_category(x)
+                for x in categories
+                if canonical_preference_category(x)
+            }
+            adjacency_actor_penalty = 7.0 if immediate_actors & set(actors) else 2.25 if recent_actors & set(actors) else 0.0
+            adjacency_series_penalty = 7.5 if series and series == _norm_key(_name_one(immediate.get("series"))) else 0.0
+            adjacency_maker_penalty = 2.5 if maker and maker == _norm_key(_name_one(immediate.get("maker"))) else 0.0
+            category_overlap = len(immediate_categories & canonical_categories) / max(1, len(immediate_categories | canonical_categories))
+            adjacency_category_penalty = min(2.5, category_overlap * 3.0)
+            adjacency_penalty = adjacency_actor_penalty + adjacency_series_penalty + adjacency_maker_penalty + adjacency_category_penalty
+            # A strongly current-intent-aligned pair may represent deliberate
+            # continuity, so keep the constraint soft instead of scattering it.
+            context_alignment = min(1.0, (
+                float((item.get("score_breakdown") or {}).get("session_intent") or 0)
+                + float((item.get("score_breakdown") or {}).get("search_intent") or 0)
+            ) / 5.0)
+            adjacency_penalty *= 1.0 - 0.55 * context_alignment
+            penalty = actor_penalty + category_penalty + maker_penalty + series_penalty + adjacency_penalty
             adjusted = value - penalty
             if adjusted > best_value:
                 best_value = adjusted
@@ -3473,6 +3623,11 @@ def _diversify_recommendations(items: list[dict[str, Any]]) -> list[dict[str, An
                     "category": round(category_penalty, 2),
                     "maker": round(maker_penalty, 2),
                     "series": round(series_penalty, 2),
+                    "adjacent": round(adjacency_penalty, 2),
+                    "adjacent_actor": round(adjacency_actor_penalty, 2),
+                    "adjacent_series": round(adjacency_series_penalty, 2),
+                    "adjacent_maker": round(adjacency_maker_penalty, 2),
+                    "adjacent_category": round(adjacency_category_penalty, 2),
                     "utility": round(adjusted, 2),
                 }
         picked = remaining.pop(best_index)
@@ -3535,7 +3690,46 @@ def _recommendation_diversity_metrics(items: list[dict[str, Any]]) -> dict[str, 
             "max_share": round(maximum / max(len(items), 1), 3),
         }
 
-    return {"actors": metrics(actor_counts), "makers": metrics(maker_counts)}
+    adjacent_pairs = max(0, len(items) - 1)
+    actor_repeats = 0
+    maker_repeats = 0
+    series_repeats = 0
+    category_overlaps: list[float] = []
+    actor_run = 1 if items else 0
+    max_actor_run = actor_run
+    for left, right in zip(items, items[1:]):
+        left_actors = {actor_identity_key(name) for name in left.get("actors") or [] if actor_identity_key(name)}
+        right_actors = {actor_identity_key(name) for name in right.get("actors") or [] if actor_identity_key(name)}
+        repeated_actor = bool(left_actors & right_actors)
+        actor_repeats += int(repeated_actor)
+        actor_run = actor_run + 1 if repeated_actor else 1
+        max_actor_run = max(max_actor_run, actor_run)
+        left_maker = _norm_key(_name_one(left.get("maker")))
+        right_maker = _norm_key(_name_one(right.get("maker")))
+        maker_repeats += int(bool(left_maker and left_maker == right_maker))
+        left_series = _norm_key(_name_one(left.get("series")))
+        right_series = _norm_key(_name_one(right.get("series")))
+        series_repeats += int(bool(left_series and left_series == right_series))
+        left_categories = {canonical_preference_category(name) for name in left.get("categories") or [] if _generic_category_factor(name) >= 0.5}
+        right_categories = {canonical_preference_category(name) for name in right.get("categories") or [] if _generic_category_factor(name) >= 0.5}
+        category_overlaps.append(len(left_categories & right_categories) / max(1, len(left_categories | right_categories)))
+
+    def adjacent_metric(count: int) -> dict[str, Any]:
+        return {"count": count, "rate": round(count / max(1, adjacent_pairs), 3)}
+
+    return {
+        "actors": metrics(actor_counts),
+        "makers": metrics(maker_counts),
+        "adjacent": {
+            "pairs": adjacent_pairs,
+            "actor_repeats": adjacent_metric(actor_repeats),
+            "maker_repeats": adjacent_metric(maker_repeats),
+            "series_repeats": adjacent_metric(series_repeats),
+            "average_category_overlap": round(sum(category_overlaps) / max(1, len(category_overlaps)), 3),
+            "max_actor_run": max_actor_run,
+            "actor_identity_source": "mdc-ng",
+        },
+    }
 
 
 def _shortlist_candidates(items: list[dict[str, Any]], profile: dict[str, Any], *, limit: int = 420) -> list[dict[str, Any]]:
@@ -3691,6 +3885,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     exploration_evaluation = _exploration_evaluation(store)
     topic_evaluation = _topic_evaluation(store)
     session_intent = _session_intent_summary(store)
+    transition_model = _session_transition_model(store)
     core_search_intent = search_intent_summary()
     similarity_status = work_similarity_status()
     context_gate = _contextual_intent_gate(session_intent, core_search_intent)
@@ -3722,6 +3917,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "interest_topics": list((behavior.get("interest_topics") or {}).get("topics") or []),
         "topic_weights": {topic_id: float(metric.get("weight") or 1) for topic_id, metric in (topic_evaluation.get("topics") or {}).items()},
         "session_intent": session_intent,
+        "transition_model": transition_model,
         "search_intent": core_search_intent,
         "context_gate": context_gate,
         "route_weights": {route: float(metric.get("weight") or 1) for route, metric in (route_evaluation.get("routes") or {}).items()},
@@ -3756,6 +3952,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "liked_topics": dict(feedback["liked_topics"]),
         "disliked_topics": dict(feedback["disliked_topics"]),
         "session_intent_revision": session_intent["revision"],
+        "transition_revision": transition_model["revision"],
         "search_intent_revision": core_search_intent["revision"],
         "source_mode": source_mode,
         "requested_limit": requested_limit,
@@ -3797,6 +3994,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         "liked_topics": dict(feedback["liked_topics"]),
         "disliked_topics": dict(feedback["disliked_topics"]),
         "session_intent_revision": session_intent["revision"],
+        "transition_revision": transition_model["revision"],
         "search_intent_revision": core_search_intent["revision"],
         "library_codes": sorted(live_codes),
         "library_code_count": len(profile.get("codes") or []),
@@ -4045,6 +4243,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "search_events": core_search_intent["event_count"],
                 "revision": f"{session_intent['revision']}:{core_search_intent['revision']}",
             },
+            "interest_transitions": transition_model,
             "exploration": {
                 "adaptive": bool(config.get("adaptive_exploration_enabled", True)),
                 "ratio": round(float(controls_config.get("exploration_ratio") or 0), 3),
