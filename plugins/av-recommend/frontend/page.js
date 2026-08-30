@@ -284,7 +284,7 @@ export async function mount(root, sdk) {
       ['标题补演员', coreFeatureQuality.title_inferred_actor_features || 0, `MDC-NG 低权重补全 · ${coreRecall.featureless_works || 0} 个仍无关系特征`],
       ['关系降噪', coreEdgeQuality.pruned_semantic_only || 0, `弱语义单边已剔除 · ${coreEdgeQuality.retained_pairs || 0} 条可信关系`],
       ['覆盖', actorDiversity.unique || 0, `有效演员 ${actorDiversity.effective || 0}`],
-      ['路线学习', `${activeRoutes}/${Object.keys(routes).length}`, `${stats.route_evaluation?.eligible || 0} 个成熟样本`],
+      ['路线学习', `${activeRoutes}/${Object.keys(routes).length}`, `${stats.route_evaluation?.eligible || 0} 可评估 · ${stats.route_evaluation?.converted || 0} 合格 · ${stats.route_evaluation?.verified || 0} 入库`],
       ['主题学习', `${activeTopics}/${Object.keys(topicMetrics).length}`, `${stats.topic_evaluation?.total_exposed || 0} 次主题曝光`],
       ['当前意图', stats.session_intent?.event_count || 0, '12 小时渐进衰减'],
       ['搜索学习', `${searchEvaluation.adaptive_signals || 0}/${searchEvaluation.signal_count || 0}`, `${searchEvaluation.eligible_events || 0} 个成熟样本`],

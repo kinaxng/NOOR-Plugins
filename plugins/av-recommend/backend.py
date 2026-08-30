@@ -46,7 +46,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 64
+RECOMMENDATION_ALGORITHM_VERSION = 65
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
 RANKING_POLICY_VERSION = 57
@@ -1499,7 +1499,10 @@ def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> di
     mature_age_ms = 7 * 86400 * 1000
     routes: dict[str, dict[str, Any]] = {}
     eligible_rows = 0
+    engaged_rows = 0
     converted_rows = 0
+    verified_rows = 0
+    mature_no_action_rows = 0
     conversion_value_sum = 0.0
     cohorts: list[dict[str, Any]] = []
     for row in (store.get("exposures") or {}).values():
@@ -1511,7 +1514,10 @@ def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> di
         if value <= 0 and not mature:
             continue
         eligible_rows += 1
+        engaged_rows += int(value > 0)
         converted_rows += int(converted)
+        verified_rows += int(value >= VERIFIED_CONVERSION_THRESHOLD)
+        mature_no_action_rows += int(value <= 0 and mature)
         conversion_value_sum += value
         converted_routes = set(row.get("converted_routes") or row.get("last_routes") or []) if value > 0 else set()
         row_routes = {str(route) for route, evidence in (row.get("routes") or {}).items() if isinstance(evidence, dict)}
@@ -1581,7 +1587,10 @@ def _route_evaluation(store: dict[str, Any], *, now_ms: int | None = None) -> di
     return {
         "routes": routes,
         "eligible": eligible_rows,
+        "engaged": engaged_rows,
         "converted": converted_rows,
+        "verified": verified_rows,
+        "mature_no_action": mature_no_action_rows,
         "prior": {"alpha": 2, "beta": 8},
         "counterfactual_method": "strategy_rank_stratified_fractional_attribution",
         "minimum_adaptation_sample": 20,

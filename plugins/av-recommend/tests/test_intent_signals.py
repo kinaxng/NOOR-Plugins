@@ -167,7 +167,7 @@ def test_topic_match_requires_the_labeled_anchor_and_relation() -> None:
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 64
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 65
     assert backend.RANKING_POLICY_VERSION == 57
     assert backend.PERSONALIZED_MODEL_VERSION == "personal-v57"
     hour = 3_600_000
@@ -387,6 +387,27 @@ def test_conversion_uses_the_acted_card_attribution_snapshot() -> None:
     assert row["converted_routes"] == ["core-neighbor", "core-graph"]
     assert row["converted_rank"] == 4
     assert row["converted_topic_ids"] == ["topic-current"]
+
+
+def test_route_evaluation_reports_funnel_stages_without_calling_views_mature() -> None:
+    backend = _backend()
+    now = 1_800_000_000_000
+    route = {"core-neighbor": {"batch_count": 1}}
+    store = {"exposures": {
+        "AAA-001": {"first_seen_at": now, "conversion_value": 0.15, "conversion_stage": "detail_view", "routes": route, "converted_routes": ["core-neighbor"]},
+        "AAA-002": {"first_seen_at": now, "conversion_value": 0.60, "conversion_stage": "subscription", "routes": route, "converted_routes": ["core-neighbor"]},
+        "AAA-003": {"first_seen_at": now, "conversion_value": 1.0, "conversion_stage": "library_imported", "routes": route, "converted_routes": ["core-neighbor"]},
+        "AAA-004": {"first_seen_at": now - 8 * 86400 * 1000, "routes": route},
+        "AAA-005": {"first_seen_at": now, "routes": route},
+    }}
+
+    result = backend._route_evaluation(store, now_ms=now)
+
+    assert result["eligible"] == 4
+    assert result["engaged"] == 3
+    assert result["converted"] == 2
+    assert result["verified"] == 1
+    assert result["mature_no_action"] == 1
 
 
 def test_v42_explicit_refresh_coalesces_with_inflight_generation(monkeypatch) -> None:
