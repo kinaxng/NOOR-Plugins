@@ -239,7 +239,7 @@ def test_topic_match_requires_the_labeled_anchor_and_relation() -> None:
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 70
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 71
     assert backend.RANKING_POLICY_VERSION == 58
     assert backend.PERSONALIZED_MODEL_VERSION == "personal-v58"
     hour = 3_600_000

@@ -46,7 +46,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 70
+RECOMMENDATION_ALGORITHM_VERSION = 71
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
 RANKING_POLICY_VERSION = 58
@@ -74,6 +74,7 @@ SESSION_INTENT_EVENT_WEIGHTS = {
 }
 QUALIFIED_CONVERSION_THRESHOLD = 0.50
 VERIFIED_CONVERSION_THRESHOLD = 0.95
+OUTCOME_LEARNING_MIN_TRIALS = 12
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
 _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
@@ -1920,7 +1921,7 @@ def _outcome_calibration(outcome_model: dict[str, Any], actor_identities: list[s
         return {"score": 0.0, "rate": 0.5, "reliability": 0.0, "trials": float(outcome_model.get("trials") or 0)}
     calibrated_rate = sum(rate * weight for rate, weight in groups) / group_weight
     trials = max(0, int(outcome_model.get("trials") or 0))
-    global_reliability = trials / (trials + 12)
+    global_reliability = trials / (trials + OUTCOME_LEARNING_MIN_TRIALS)
     # The strongest matched feature controls evidence quality. More correlated
     # labels may refine the rate estimate, but cannot manufacture sample size.
     reliability = min(global_reliability, max(weight for _rate, weight in groups))
@@ -4307,6 +4308,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         source_mode = "latest"
     store = _ensure_store()
     behavior = await preference_behavior_summary()
+    outcome_model = behavior.get("outcomes") if isinstance(behavior.get("outcomes"), dict) else {}
     if _sync_core_conversion_stages(store, behavior.get("code_stages")):
         _save_store(store)
     model_selection = _select_ranking_model(config, store)
@@ -4694,6 +4696,15 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "exploration_evaluation": exploration_evaluation,
             "topic_evaluation": topic_evaluation,
             "search_evaluation": search_evaluation_summary,
+            "outcome_learning": {
+                "trials": int(outcome_model.get("trials") or 0),
+                "verified": int(outcome_model.get("verified") or 0),
+                "rate": float(outcome_model.get("rate") or 0),
+                "minimum_trials": OUTCOME_LEARNING_MIN_TRIALS,
+                "reliability": round(int(outcome_model.get("trials") or 0) / (int(outcome_model.get("trials") or 0) + OUTCOME_LEARNING_MIN_TRIALS), 3),
+                "status": "protected" if int(outcome_model.get("trials") or 0) < OUTCOME_LEARNING_MIN_TRIALS else "learning",
+                "max_adjustment": round(max((abs(float((item.get("score_breakdown") or {}).get("outcomes") or 0)) for item in scored), default=0.0), 1),
+            },
             "context_mixture": context_gate,
             "temporal_preference": {
                 "version": int(((behavior.get("trends") or {}).get("version") or 1)),
