@@ -46,10 +46,10 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 71
+RECOMMENDATION_ALGORITHM_VERSION = 72
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
-RANKING_POLICY_VERSION = 58
+RANKING_POLICY_VERSION = 59
 PERSONALIZED_MODEL_VERSION = f"personal-v{RANKING_POLICY_VERSION}"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
@@ -4699,6 +4699,9 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "outcome_learning": {
                 "trials": int(outcome_model.get("trials") or 0),
                 "verified": int(outcome_model.get("verified") or 0),
+                "pending": int(outcome_model.get("pending") or 0),
+                "mature_unverified": int(outcome_model.get("mature_unverified") or 0),
+                "maturity_days": int(outcome_model.get("maturity_days") or 7),
                 "rate": float(outcome_model.get("rate") or 0),
                 "minimum_trials": OUTCOME_LEARNING_MIN_TRIALS,
                 "reliability": round(int(outcome_model.get("trials") or 0) / (int(outcome_model.get("trials") or 0) + OUTCOME_LEARNING_MIN_TRIALS), 3),

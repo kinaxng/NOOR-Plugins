@@ -289,7 +289,7 @@ export async function mount(root, sdk) {
       ['主题学习', `${activeTopics}/${Object.keys(topicMetrics).length}`, `${stats.topic_evaluation?.total_exposed || 0} 次主题曝光`],
       ['当前意图', stats.session_intent?.event_count || 0, '12 小时渐进衰减'],
       ['搜索学习', `${searchEvaluation.adaptive_signals || 0}/${searchEvaluation.signal_count || 0}`, `${searchEvaluation.eligible_events || 0} 个成熟样本`],
-      ['转化学习', `${outcomeLearning.trials || 0}/${outcomeLearning.minimum_trials || 12}`, outcomeLearning.status === 'protected' ? `小样本保护 · ${outcomeLearning.verified || 0} 已验证 · 最大 ±${outcomeLearning.max_adjustment || 0} 分` : `可靠 ${Math.round((outcomeLearning.reliability || 0) * 100)}% · ${outcomeLearning.verified || 0} 已验证`],
+      ['转化学习', `${outcomeLearning.trials || 0}/${outcomeLearning.minimum_trials || 12}`, outcomeLearning.status === 'protected' ? `小样本保护 · ${outcomeLearning.pending || 0} 观察中 · ${outcomeLearning.verified || 0} 已验证` : `可靠 ${Math.round((outcomeLearning.reliability || 0) * 100)}% · ${outcomeLearning.verified || 0} 已验证 · ${outcomeLearning.mature_unverified || 0} 未转化`],
       ['意图门控', contextMixture.active ? `${Math.round((contextMixture.gate || 0) * 100)}%` : '待信号', contextMixture.active ? `可靠 ${Math.round((contextMixture.reliability || 0) * 100)}%` : '长期画像为主'],
       ['曝光轮换', exposureFatigue.active || 0, `${exposureFatigue.short || 0} 短时 · ${exposureFatigue.long || 0} 长期`],
     ]
