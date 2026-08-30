@@ -46,7 +46,7 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 68
+RECOMMENDATION_ALGORITHM_VERSION = 69
 # Cache/schema changes must not fragment ranking experiment cohorts. Bump this
 # only when the scoring or ordering policy itself changes.
 RANKING_POLICY_VERSION = 57
@@ -4756,7 +4756,6 @@ def _schedule_core_evaluation(acquisition_times: dict[str, Any], target_codes: s
             await asyncio.sleep(5)
             await work_similarity_temporal_backtest(dict(acquisition_times))
             await work_similarity_recall_evaluation(set(target_codes), dict(seed_weights))
-            _invalidate_recommendation_cache(hard=False, reason="core-evaluation")
         except asyncio.CancelledError:
             raise
         except Exception:

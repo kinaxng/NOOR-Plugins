@@ -15,6 +15,39 @@ def _backend():
     return module
 
 
+def test_core_evaluation_does_not_invalidate_content_cache(monkeypatch) -> None:
+    asyncio.run(_core_evaluation_does_not_invalidate_content_cache(monkeypatch))
+
+
+async def _core_evaluation_does_not_invalidate_content_cache(monkeypatch) -> None:
+    backend = _backend()
+    backend._core_evaluation_task = None
+    calls = []
+
+    async def no_delay(_seconds):
+        return None
+
+    async def temporal(values):
+        calls.append(("temporal", values))
+
+    async def recall(codes, weights):
+        calls.append(("recall", codes, weights))
+
+    monkeypatch.setattr(backend.asyncio, "sleep", no_delay)
+    monkeypatch.setattr(backend, "work_similarity_temporal_backtest", temporal)
+    monkeypatch.setattr(backend, "work_similarity_recall_evaluation", recall)
+    monkeypatch.setattr(
+        backend,
+        "_invalidate_recommendation_cache",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("offline diagnostics must not invalidate recommendations")),
+    )
+
+    backend._schedule_core_evaluation({"AAA-001": "2026-01-01"}, {"AAA-001"}, {"AAA-001": 1.0})
+    await backend._core_evaluation_task
+
+    assert [row[0] for row in calls] == ["temporal", "recall"]
+
+
 def test_session_intent_uses_identity_and_half_life(monkeypatch) -> None:
     backend = _backend()
     monkeypatch.setattr(backend, "actor_identity_key", lambda value: "actor:one" if value else "")
@@ -167,7 +200,7 @@ def test_topic_match_requires_the_labeled_anchor_and_relation() -> None:
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 68
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 69
     assert backend.RANKING_POLICY_VERSION == 57
     assert backend.PERSONALIZED_MODEL_VERSION == "personal-v57"
     hour = 3_600_000
