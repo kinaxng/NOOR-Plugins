@@ -46,8 +46,11 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 60
-PERSONALIZED_MODEL_VERSION = "personal-v60"
+RECOMMENDATION_ALGORITHM_VERSION = 62
+# Cache/schema changes must not fragment ranking experiment cohorts. Bump this
+# only when the scoring or ordering policy itself changes.
+RANKING_POLICY_VERSION = 57
+PERSONALIZED_MODEL_VERSION = f"personal-v{RANKING_POLICY_VERSION}"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -1087,7 +1090,7 @@ def _exposure_penalties(store: dict[str, Any], *, now_ms: int | None = None) -> 
     return {code: float(row["total"]) for code, row in _exposure_fatigue(store, now_ms=now_ms).items()}
 
 
-def _mark_exposure_converted(store: dict[str, Any], code: Any, event_type: str = "interaction") -> bool:
+def _mark_exposure_converted(store: dict[str, Any], code: Any, event_type: str = "interaction", context: dict[str, Any] | None = None) -> bool:
     canonical = _norm_code(code)
     row = (store.get("exposures") or {}).get(canonical)
     event_type = str(event_type or "interaction")[:64]
@@ -1097,19 +1100,33 @@ def _mark_exposure_converted(store: dict[str, Any], code: Any, event_type: str =
     current_value = _conversion_value(row)
     if value <= current_value:
         return False
+    context = context if isinstance(context, dict) else {}
     now = _now_ms()
     row["converted_at"] = int(row.get("converted_at") or now)
     row["last_conversion_at"] = now
     row["conversion_event"] = event_type
     row["conversion_stage"] = event_type
     row["conversion_value"] = value
-    row["converted_model"] = str(row.get("converted_model") or row.get("last_model") or "unknown")
-    row["converted_rank"] = int(row.get("converted_rank") or row.get("last_rank") or 0)
-    row["converted_routes"] = list(row.get("converted_routes") or row.get("last_routes") or [])
-    row["converted_strategy"] = str(row.get("converted_strategy") or row.get("last_strategy") or "ranking")
-    row["converted_topic_ids"] = list(row.get("converted_topic_ids") or row.get("last_topic_ids") or [])
+    event_routes = [str(route) for route in (context.get("recall_sources") or []) if str(route or "").strip()]
+    event_rank = int(context.get("recommendation_rank") or context.get("rank") or 0)
+    event_topic = context.get("interest_topic") if isinstance(context.get("interest_topic"), dict) else {}
+    event_topic_id = str(event_topic.get("id") or "")
+    row["converted_model"] = str(context.get("model_version") or row.get("converted_model") or row.get("last_model") or "unknown")
+    row["converted_rank"] = event_rank or int(row.get("converted_rank") or row.get("last_rank") or 0)
+    row["converted_routes"] = list(dict.fromkeys(event_routes or row.get("converted_routes") or row.get("last_routes") or []))
+    row["converted_strategy"] = "exploration" if context.get("is_exploration") else str(context.get("strategy") or row.get("converted_strategy") or row.get("last_strategy") or "ranking")
+    row["converted_topic_ids"] = [event_topic_id] if event_topic_id else list(row.get("converted_topic_ids") or row.get("last_topic_ids") or [])
     history = [item for item in (row.get("conversion_history") or []) if isinstance(item, dict)]
-    history.append({"stage": event_type, "value": value, "at": now})
+    history.append({
+        "stage": event_type,
+        "value": value,
+        "at": now,
+        "model": row["converted_model"],
+        "rank": row["converted_rank"],
+        "routes": row["converted_routes"],
+        "strategy": row["converted_strategy"],
+        "topic_ids": row["converted_topic_ids"],
+    })
     row["conversion_history"] = history[-12:]
     return True
 
@@ -4830,7 +4847,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         data[key] = [x for x in data.get(key, []) if _norm_code(x.get("code") if isinstance(x, dict) else x) != code]
         data[key].insert(0, row)
         if kind == "like":
-            _mark_exposure_converted(data, code, "feedback:like")
+            _mark_exposure_converted(data, code, "feedback:like", row)
             _record_session_intent(data, row, "feedback:like")
         _save_store(data)
         _invalidate_recommendation_cache()
@@ -4845,7 +4862,7 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
             data=payload.get("data") if isinstance(payload.get("data"), dict) else {},
         )
         data = _ensure_store()
-        converted = _mark_exposure_converted(data, payload.get("code"), str(payload.get("event_type") or "interaction"))
+        converted = _mark_exposure_converted(data, payload.get("code"), str(payload.get("event_type") or "interaction"), payload)
         intent_recorded = _record_session_intent(data, payload, str(payload.get("event_type") or "interaction"))
         if converted or intent_recorded:
             _save_store(data)

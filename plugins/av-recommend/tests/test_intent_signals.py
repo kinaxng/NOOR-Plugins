@@ -167,8 +167,9 @@ def test_topic_match_requires_the_labeled_anchor_and_relation() -> None:
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 60
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v60"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 62
+    assert backend.RANKING_POLICY_VERSION == 57
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v57"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -348,6 +349,35 @@ def test_resource_timeout_schedules_queue_write_without_waiting(monkeypatch) -> 
         await asyncio.gather(*list(backend._resource_enqueue_tasks))
 
     asyncio.run(scenario())
+
+
+def test_conversion_uses_the_acted_card_attribution_snapshot() -> None:
+    backend = _backend()
+    store = {"exposures": {"AAA-001": {
+        "last_routes": ["javdb-feed"], "last_rank": 22, "last_model": "old-model",
+        "last_strategy": "ranking", "last_topic_ids": ["old-topic"],
+    }}}
+
+    converted = backend._mark_exposure_converted(store, "AAA-001", "subscription", {
+        "recall_sources": ["core-neighbor", "core-graph"],
+        "recommendation_rank": 4,
+        "model_version": "personal-current",
+        "is_exploration": True,
+        "interest_topic": {"id": "topic-current"},
+    })
+
+    row = store["exposures"]["AAA-001"]
+    assert converted is True
+    assert row["converted_routes"] == ["core-neighbor", "core-graph"]
+    assert row["converted_rank"] == 4
+    assert row["converted_model"] == "personal-current"
+    assert row["converted_strategy"] == "exploration"
+    assert row["converted_topic_ids"] == ["topic-current"]
+    assert row["conversion_history"][-1]["routes"] == row["converted_routes"]
+    assert backend._mark_exposure_converted(store, "AAA-001", "library_imported") is True
+    assert row["converted_routes"] == ["core-neighbor", "core-graph"]
+    assert row["converted_rank"] == 4
+    assert row["converted_topic_ids"] == ["topic-current"]
 
 
 def test_v42_explicit_refresh_coalesces_with_inflight_generation(monkeypatch) -> None:
