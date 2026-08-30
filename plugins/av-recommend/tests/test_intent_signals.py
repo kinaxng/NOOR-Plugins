@@ -141,8 +141,8 @@ def test_v47_missing_structured_actor_uses_conservative_mdc_title_mention(monkey
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 51
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v51"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 52
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v52"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
