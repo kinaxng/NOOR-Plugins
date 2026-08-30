@@ -965,7 +965,8 @@ export async function mount(root, sdk) {
       const explanationTitle = document.createElement('summary')
       explanationTitle.textContent = `为什么推荐${interval.lower != null && interval.upper != null ? ` · 置信 ${Math.round(interval.lower)}–${Math.round(interval.upper)}` : ''}`
       const explanationFactors = el('div', 'av-rec-explanation-factors')
-      const visibleFactors = (explanation.factors || []).slice(0, 6)
+      const allFactors = explanation.factors || []
+      const visibleFactors = allFactors.slice(0, 6)
       for (const factor of visibleFactors) {
         const node = document.createElement('span')
         node.innerHTML = `<em>${escapeHtml(factor.label || factor.type || '证据')}</em><strong>${escapeHtml(Math.round(Number(factor.score) || 0))}</strong>`
@@ -978,14 +979,19 @@ export async function mount(root, sdk) {
         explanationFactors.appendChild(node)
       }
       const evidence = el('div', 'av-rec-explanation-evidence')
-      const actorFactor = visibleFactors.find(factor => factor?.type === 'actor')
+      const actorFactor = allFactors.find(factor => factor?.type === 'actor')
       const actorEvidence = Array.isArray(actorFactor?.evidence) ? actorFactor.evidence : []
       if (actorEvidence.length) {
         const mapped = actorEvidence.filter(row => row?.identity_source === 'mdc-ng').length
         const names = actorEvidence.map(row => `${row.name}（媒体库 ${row.library_count || 0} 部）`).join('、')
         evidence.appendChild(el('p', '', `演员依据：${names}${mapped ? ` · ${mapped} 位由 MDC-NG 统一身份` : ''}`))
       }
-      const resourceFactor = visibleFactors.find(factor => factor?.type === 'resource_calibration')
+      const semanticFactor = allFactors.find(factor => factor?.type === 'semantic')
+      const semanticEvidence = Array.isArray(semanticFactor?.evidence) ? semanticFactor.evidence : []
+      if (semanticEvidence.length) {
+        evidence.appendChild(el('p', '', `标题画像：${semanticEvidence.slice(0, 4).map(row => `${row.name}（媒体库 ${Math.round(Number(row.count) || 0)} 次）`).join('、')}`))
+      }
+      const resourceFactor = allFactors.find(factor => factor?.type === 'resource_calibration')
       if (resourceFactor?.evidence) {
         const labels = {
           cracked: '破解', subtitle: '中字', uncensored: '无码', private: '私有源', public: '公开源',

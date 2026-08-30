@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 52
-PERSONALIZED_MODEL_VERSION = "personal-v52"
+RECOMMENDATION_ALGORITHM_VERSION = 53
+PERSONALIZED_MODEL_VERSION = "personal-v53"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -3506,7 +3506,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         ][:4]},
         {"type": "category", "label": "题材偏好", "score": round(category_preference_score, 1)},
         {"type": "relationship", "label": "作品关系", "score": round(relationship_preference_score, 1), "evidence": list(item.get("neighbor_evidence") or [])[:3]},
-        {"type": "semantic", "label": "标题语义", "score": round(semantic_preference_score, 1)},
+        {"type": "semantic", "label": "标题语义", "score": round(semantic_preference_score, 1), "evidence": semantic_hits[:4]},
         {"type": "trend", "label": "近期趋势", "score": round(trend_preference_score, 1)},
         {"type": "topic", "label": "组合兴趣主题", "score": round(interest_topic_score, 1), "evidence": matched_interest_topic or {}},
         {"type": "session", "label": "当前兴趣方向", "score": round(session_intent_score, 1)},
