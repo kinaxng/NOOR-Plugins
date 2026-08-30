@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 58
-PERSONALIZED_MODEL_VERSION = "personal-v58"
+RECOMMENDATION_ALGORITHM_VERSION = 59
+PERSONALIZED_MODEL_VERSION = "personal-v59"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -77,6 +77,7 @@ _LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(
 _pool_lock = asyncio.Lock()
 _recommendation_generation_locks = {"latest": asyncio.Lock(), "full": asyncio.Lock()}
 _recommendation_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
+_resource_enqueue_tasks: set[asyncio.Task[Any]] = set()
 _scheduler_task: asyncio.Task[None] | None = None
 _scheduler_stop: asyncio.Event | None = None
 _prewarm_state: dict[str, Any] = {"status": "idle", "last_started_at": None, "last_finished_at": None, "last_error": "", "modes": []}
@@ -2837,6 +2838,11 @@ async def stop_background() -> None:
     if _recommendation_refresh_tasks:
         await asyncio.gather(*list(_recommendation_refresh_tasks.values()), return_exceptions=True)
     _recommendation_refresh_tasks.clear()
+    for task in list(_resource_enqueue_tasks):
+        task.cancel()
+    if _resource_enqueue_tasks:
+        await asyncio.gather(*list(_resource_enqueue_tasks), return_exceptions=True)
+    _resource_enqueue_tasks.clear()
     _scheduler_stop = None
 
 
@@ -3799,12 +3805,19 @@ async def _enrich_recommendation_resources(
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        try:
-            from app.knowledge.intelligence import enqueue_resource_refresh
-            queued = await enqueue_resource_refresh(pending_codes, priority=20)
-        except Exception:
-            queued = 0
-        warnings.append(f"正在后台补全 {len(pending)} 部作品的资源情报" if queued else f"有 {len(pending)} 部作品的资源情报将在稍后重试")
+        async def enqueue_later() -> None:
+            try:
+                from app.knowledge.intelligence import enqueue_resource_refresh
+                await enqueue_resource_refresh(pending_codes, priority=20)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+        enqueue_task = asyncio.create_task(enqueue_later())
+        _resource_enqueue_tasks.add(enqueue_task)
+        enqueue_task.add_done_callback(_resource_enqueue_tasks.discard)
+        warnings.append(f"正在后台补全 {len(pending)} 部作品的资源情报")
     return warnings[:8]
 
 

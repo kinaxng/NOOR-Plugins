@@ -167,8 +167,8 @@ def test_topic_match_requires_the_labeled_anchor_and_relation() -> None:
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 58
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v58"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 59
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v59"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -315,6 +315,39 @@ def test_v42_javdb_candidate_sources_run_in_parallel(monkeypatch) -> None:
     assert items == [] and warnings == []
     assert len(source_calls) == 4
     assert maximum_active == 4
+
+
+def test_resource_timeout_schedules_queue_write_without_waiting(monkeypatch) -> None:
+    backend = _backend()
+    from app.knowledge import intelligence
+    from app.plugins.runtime import runtime
+    enqueue_started = asyncio.Event()
+    release_enqueue = asyncio.Event()
+
+    async def slow_search(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    async def slow_enqueue(_codes, *, priority):
+        assert priority == 20
+        enqueue_started.set()
+        await release_enqueue.wait()
+        return 1
+
+    monkeypatch.setattr(runtime, "search_resources", slow_search)
+    monkeypatch.setattr(intelligence, "enqueue_resource_refresh", slow_enqueue)
+
+    async def scenario() -> None:
+        warnings = await backend._enrich_recommendation_resources(
+            {"resource_enrich_limit": 1, "resource_enrich_budget_seconds": 1},
+            [{"code": "AAA-001"}],
+        )
+        await asyncio.wait_for(enqueue_started.wait(), timeout=0.1)
+        assert warnings == ["正在后台补全 1 部作品的资源情报"]
+        assert backend._resource_enqueue_tasks
+        release_enqueue.set()
+        await asyncio.gather(*list(backend._resource_enqueue_tasks))
+
+    asyncio.run(scenario())
 
 
 def test_v42_explicit_refresh_coalesces_with_inflight_generation(monkeypatch) -> None:
