@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 37
-PERSONALIZED_MODEL_VERSION = "personal-v37"
+RECOMMENDATION_ALGORITHM_VERSION = 38
+PERSONALIZED_MODEL_VERSION = "personal-v38"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -1797,19 +1797,60 @@ def _media_preference_weight(entity: KnowledgeEntity) -> float:
     if raw_created:
         with contextlib.suppress(ValueError):
             observed_at = dt.datetime.fromisoformat(raw_created.replace("Z", "+00:00"))
-    observed_at = observed_at or entity.updated_at or entity.created_at
+    # Library presence is durable evidence. Re-index timestamps are operational
+    # metadata and must not make an old title look newly acquired.
     if not observed_at:
-        return 1.0
+        return 0.75
     try:
         if observed_at.tzinfo is None:
             observed_at = observed_at.replace(tzinfo=dt.timezone.utc)
         age_days = max(0.0, (dt.datetime.now(dt.timezone.utc) - observed_at.astimezone(dt.timezone.utc)).total_seconds() / 86400)
     except Exception:
-        return 1.0
+        return 0.75
     age_days = math.floor(age_days)
-    if age_days <= 90:
+    if age_days <= 60:
         return 1.0
-    return max(0.35, math.pow(0.5, (age_days - 90) / 540))
+    return max(0.75, 0.75 + 0.25 * math.pow(0.5, (age_days - 60) / 180))
+
+
+def _release_freshness(item: dict[str, Any], *, today: dt.date | None = None) -> dict[str, Any]:
+    raw = str(item.get("release_date") or item.get("date") or "").strip()
+    match = re.search(r"\b(19\d{2}|20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b", raw)
+    if not match:
+        return {"reliable": False, "score": 0.0, "age_days": None, "source": "", "reason": "missing_or_partial_date"}
+    try:
+        released = dt.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return {"reliable": False, "score": 0.0, "age_days": None, "source": "", "reason": "invalid_date"}
+    today = today or dt.datetime.now(dt.timezone.utc).date()
+    age_days = (today - released).days
+    if age_days < -45 or released.year < 1980:
+        return {"reliable": False, "score": 0.0, "age_days": age_days, "source": "", "reason": "implausible_date"}
+    field_sources = item.get("field_sources") if isinstance(item.get("field_sources"), dict) else {}
+    source = str(field_sources.get("release_date") or "").strip()
+    if not source:
+        source_ids = {
+            str(tag.get("id") or "") for tag in item.get("source_tags") or [] if isinstance(tag, dict)
+        }
+        source = "javdb" if {"javdb", "javdb-feed"} & source_ids or item.get("javdb_id") else "candidate"
+    confidence = 1.0 if source in {"javdb", "avdb", "mdc-ng"} else 0.9 if source in {"media-library", "candidate"} else 0.75
+    effective_age = max(0, age_days)
+    if effective_age <= 90:
+        base = 4.0
+    elif effective_age <= 365:
+        base = 4.0 - (effective_age - 90) / 275 * 2.0
+    elif effective_age <= 730:
+        base = 2.0 - (effective_age - 365) / 365 * 1.5
+    else:
+        base = 0.0
+    return {
+        "reliable": True,
+        "score": round(max(0.0, base * confidence), 3),
+        "age_days": age_days,
+        "source": source,
+        "confidence": confidence,
+        "reason": "trusted_release_date",
+    }
 
 
 def _title_profile_media_payload(item: KnowledgeEntity) -> dict[str, Any]:
@@ -2554,6 +2595,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
     outcome_calibration_score = 0.0
     route_calibration_score = 0.0
     trend_preference_score = 0.0
+    freshness_score = 0.0
     interest_topic_score = 0.0
     session_intent_score = 0.0
     search_intent_score = 0.0
@@ -2977,13 +3019,15 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         elif route_calibration_score <= -0.8:
             reasons.append("召回路线谨慎降权")
     release = str(item.get("release_date") or item.get("date") or "")
-    if release.startswith("2026"):
-        score += 4
-        quality_score += 4
+    freshness = _release_freshness(item)
+    freshness_score = float(freshness.get("score") or 0)
+    if freshness_score >= 2.5:
+        score += freshness_score
+        quality_score += freshness_score
         reasons.append("近期作品")
-    elif release.startswith("2025"):
-        score += 2
-        quality_score += 2
+    elif freshness_score > 0:
+        score += freshness_score
+        quality_score += freshness_score
 
     cold_start_strength = float(config.get("_cold_start_strength") or 0)
     if cold_start_strength > 0:
@@ -3065,6 +3109,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         {"type": "outcome", "label": "入库结果校准", "score": round(outcome_calibration_score, 1)},
         {"type": "resource", "label": "资源可用性", "score": round(actionability_score, 1)},
         {"type": "quality", "label": "作品质量", "score": round(quality_score, 1)},
+        {"type": "freshness", "label": "发布时间", "score": round(freshness_score, 1), "evidence": freshness},
     ]
     factor_rows = sorted((row for row in factor_rows if abs(float(row.get("score") or 0)) >= 0.1), key=lambda row: abs(float(row["score"])), reverse=True)
     explanation = {
@@ -3083,6 +3128,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
         "fanart_url": item.get("fanart_url") or item.get("cover_url") or item.get("thumb_url") or "",
         "image_candidates": _image_candidates(item, item.get("detail")),
         "release_date": release,
+        "release_freshness": freshness,
         "actors": actors[:6],
         "categories": categories[:8],
         "title_traits": title_traits[:8],
@@ -3139,6 +3185,7 @@ def _candidate_score(item: dict[str, Any], profile: dict[str, Any], config: dict
             "recall_route": round(route_calibration_score, 1),
             "resources": round(actionability_score, 1),
             "quality": round(quality_score, 1),
+            "freshness": round(freshness_score, 1),
             "penalty": round(penalty_score, 1),
         },
         "type": "recommendation",
@@ -3562,8 +3609,7 @@ def _apply_recommendation_controls(items: list[dict[str, Any]], config: dict[str
         uncertainty = max(0.0, float(interval.get("upper") or 0) - float(interval.get("lower") or 0)) / 100
         actor_novelty = 1.0 if float(breakdown.get("actor_preference") or 0) <= 0 else 0.0
         relation_confidence = float(item.get("neighbor_confidence") or 0)
-        release = str(item.get("release_date") or "")
-        freshness = 1.0 if release.startswith(str(dt.date.today().year)) else 0.55 if release.startswith(str(dt.date.today().year - 1)) else 0.0
+        freshness = min(1.0, float((item.get("release_freshness") or _release_freshness(item)).get("score") or 0) / 4)
         completeness = item.get("portrait_completeness") if isinstance(item.get("portrait_completeness"), dict) else {}
         portrait_quality = sum(bool(completeness.get(key)) for key in ("title", "cover", "actors", "categories")) / 4 if completeness else 0.5
         digest = hashlib.sha256(f"{seed}:{item.get('code') or item.get('title') or ''}".encode("utf-8")).digest()
@@ -3961,6 +4007,12 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             "topic_evaluation": topic_evaluation,
             "search_evaluation": search_evaluation_summary,
             "context_mixture": context_gate,
+            "temporal_preference": {
+                "version": int(((behavior.get("trends") or {}).get("version") or 1)),
+                "scales": dict(((behavior.get("trends") or {}).get("scales") or {})),
+                "rising_actors": list((((behavior.get("trends") or {}).get("actors") or {}).get("rising") or []))[:5],
+                "rising_categories": list((((behavior.get("trends") or {}).get("categories") or {}).get("rising") or []))[:5],
+            },
             "exposure_fatigue": {
                 "active": len(exposure_fatigue),
                 "short": sum(1 for row in exposure_fatigue.values() if float(row.get("short") or 0) >= 0.1),

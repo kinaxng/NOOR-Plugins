@@ -111,8 +111,8 @@ def test_v29_context_gate_is_reliable_bounded_and_favors_current_alignment() -> 
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 37
-    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v37"
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 38
+    assert backend.PERSONALIZED_MODEL_VERSION == "personal-v38"
     hour = 3_600_000
     day = 24 * hour
     now = 1_800_000_000_000
@@ -235,3 +235,33 @@ def test_coverage_repair_queue_is_bounded_actionable_and_cooled_down(monkeypatch
     }})
     public = backend._profile_enrichment_public_state()
     assert (public["coverage_queued"], public["coverage_enriched"], public["coverage_failed"]) == (2, 1, 1)
+
+
+def test_release_freshness_uses_trusted_full_dates_not_calendar_year_shortcuts() -> None:
+    backend = _backend()
+    today = backend.dt.date(2026, 8, 30)
+    recent = backend._release_freshness({"release_date": "2026-08-01", "field_sources": {"release_date": "javdb"}}, today=today)
+    prior_year_but_recent = backend._release_freshness({"release_date": "2025-12-31", "field_sources": {"release_date": "avdb"}}, today=today)
+    stale = backend._release_freshness({"release_date": "2023-08-01"}, today=today)
+    future = backend._release_freshness({"release_date": "2027-12-01"}, today=today)
+    partial = backend._release_freshness({"release_date": "2026"}, today=today)
+
+    assert recent["score"] == 4.0 and recent["reliable"]
+    assert 2.0 < prior_year_but_recent["score"] < 4.0
+    assert stale["score"] == 0
+    assert not future["reliable"]
+    assert not partial["reliable"]
+
+
+def test_library_time_weight_keeps_durable_floor_and_ignores_reindex_timestamp() -> None:
+    backend = _backend()
+    now = backend.dt.datetime.now(backend.dt.timezone.utc)
+    old = type("Entity", (), {
+        "data": {"date_created": (now - backend.dt.timedelta(days=630)).isoformat()},
+        "updated_at": now,
+        "created_at": now,
+    })()
+    reindexed_without_library_date = type("Entity", (), {"data": {}, "updated_at": now, "created_at": now})()
+
+    assert 0.75 <= backend._media_preference_weight(old) < 0.8
+    assert backend._media_preference_weight(reindexed_without_library_date) == 0.75

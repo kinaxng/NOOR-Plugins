@@ -254,6 +254,8 @@ export async function mount(root, sdk) {
     const coreOffline = coreRecall.offline_evaluation || {}
     const coverageRepair = coreRecall.coverage_repair_state || {}
     const relationWeights = coreRecall.relation_weights || {}
+    const temporal = stats.temporal_preference || {}
+    const temporalScales = temporal.scales || {}
     profile.innerHTML = ''
     const cards = [
       ['媒体库', p.media_count || 0, '已分析作品'],
@@ -267,6 +269,7 @@ export async function mount(root, sdk) {
       ['离线找回', coreOffline.hit_rate?.['@20'] != null ? `${Math.round(coreOffline.hit_rate['@20'] * 100)}%` : '待评估', coreOffline.evaluated ? `${coreOffline.evaluated} 部留一 · 覆盖 ${Math.round((coreOffline.coverage || 0) * 100)}%` : '留一邻域审计'],
       ['覆盖修复', `${coverageRepair.enriched || 0}/${coverageRepair.queued || 0}`, `${coreRecall.coverage_repair_queued || 0} 个本轮加入 · ${coverageRepair.failed || 0} 失败`],
       ['关系校准', Object.keys(relationWeights).length || 0, Object.keys(relationWeights).length ? Object.entries(relationWeights).map(([key, value]) => `${key} ${Math.round(value * 100)}%`).join(' · ') : '训练/验证暂无一致调整'],
+      ['时间画像', temporalScales.current?.work_count || 0, `${temporalScales.medium?.work_count || 0} 中期 · ${temporalScales.durable?.work_count || 0} 长期`],
       ['特征净化', (coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0) + (coreFeatureQuality.dropped_code_prefix_categories || 0), `${(coreFeatureQuality.dropped_actor_alias_terms || 0) + (coreFeatureQuality.dropped_actor_variant_terms || 0)} 演员重复 · ${coreFeatureQuality.dropped_code_prefix_categories || 0} 番号前缀`],
       ['覆盖', actorDiversity.unique || 0, `有效演员 ${actorDiversity.effective || 0}`],
       ['路线学习', `${activeRoutes}/${Object.keys(routes).length}`, `${stats.route_evaluation?.eligible || 0} 个成熟样本`],
