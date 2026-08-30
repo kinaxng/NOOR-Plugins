@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 35
-PERSONALIZED_MODEL_VERSION = "personal-v32"
+RECOMMENDATION_ALGORITHM_VERSION = 36
+PERSONALIZED_MODEL_VERSION = "personal-v36"
 STABLE_MODEL_VERSION = "stable-v1"
 CONVERSION_STAGE_VALUES = {
     "detail_view": 0.15,
@@ -3789,12 +3789,6 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     try:
         from app.knowledge.intelligence import work_similarity_candidates
         graph_seed_weights, graph_seed_sources = _positive_neighbor_seed_weights(profile, behavior, store)
-        similarity_meta = await work_similarity_candidates(
-            graph_seed_weights or {code: 1.0 for code in profile.get("codes") or set()},
-            negative_seed_weights=_negative_neighbor_seed_weights(store),
-            limit=160,
-        )
-        similarity_meta["seed_sources"] = graph_seed_sources
         try:
             similarity_evaluation = await work_similarity_recall_evaluation(
                 set(profile.get("codes") or []),
@@ -3802,6 +3796,15 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             )
         except Exception as exc:
             similarity_evaluation = {"error": str(exc), "evaluated": 0}
+        relation_weights = dict(((similarity_evaluation.get("relation_counterfactual") or {}).get("recommended_weights") or {}))
+        similarity_meta = await work_similarity_candidates(
+            graph_seed_weights or {code: 1.0 for code in profile.get("codes") or set()},
+            negative_seed_weights=_negative_neighbor_seed_weights(store),
+            relation_weights=relation_weights,
+            limit=160,
+        )
+        similarity_meta["seed_sources"] = graph_seed_sources
+        similarity_meta["relation_weights"] = relation_weights
         coverage_repairs = [
             row for row in (similarity_evaluation.get("sample_misses") or [])
             if isinstance(row, dict)
@@ -3989,6 +3992,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "core_only_selected": sum(1 for item in scored if set(item.get("recall_sources") or []) in ({"core-neighbor"}, {"core-graph"})),
                 "feed_overlap_selected": sum(1 for item in scored if {"core-neighbor", "core-graph"} & set(item.get("recall_sources") or []) and base_recall_source in (item.get("recall_sources") or [])),
                 "propagation": dict(similarity_meta.get("propagation") or {}),
+                "relation_weights": dict(similarity_meta.get("relation_weights") or {}),
                 "seed_sources": dict(similarity_meta.get("seed_sources") or {}),
                 "average_confidence": round(sum(float(item.get("neighbor_confidence") or 0) for item in scored if float(item.get("neighbor_score") or 0) > 0) / max(1, sum(1 for item in scored if float(item.get("neighbor_score") or 0) > 0)), 3),
                 "profile_gaps": dict(similarity_meta.get("profile_gaps") or {}),
