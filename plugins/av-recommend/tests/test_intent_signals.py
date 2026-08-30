@@ -167,7 +167,7 @@ def test_topic_match_requires_the_labeled_anchor_and_relation() -> None:
 
 def test_v32_exposure_fatigue_rotates_recovers_and_respects_engagement(monkeypatch) -> None:
     backend = _backend()
-    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 66
+    assert backend.RECOMMENDATION_ALGORITHM_VERSION == 67
     assert backend.RANKING_POLICY_VERSION == 57
     assert backend.PERSONALIZED_MODEL_VERSION == "personal-v57"
     hour = 3_600_000
@@ -471,6 +471,38 @@ def test_normal_request_rejects_snapshot_from_old_algorithm(monkeypatch) -> None
     assert calls == 1
     assert result["algorithm_version"] == backend.RECOMMENDATION_ALGORITHM_VERSION
     assert result["items"] == []
+
+
+def test_normal_request_coalesces_with_startup_prewarm(monkeypatch) -> None:
+    backend = _backend()
+    calls = 0
+    snapshot: dict = {}
+    backend._recommendation_generation_locks = {"latest": asyncio.Lock(), "full": asyncio.Lock()}
+
+    async def fake_unlocked(_config: dict, _payload: dict) -> dict:
+        nonlocal calls, snapshot
+        calls += 1
+        await asyncio.sleep(0.03)
+        snapshot = {
+            "algorithm_version": backend.RECOMMENDATION_ALGORITHM_VERSION,
+            "model": {"version": backend.PERSONALIZED_MODEL_VERSION},
+            "items": [{"code": "AAA-001"}],
+        }
+        return dict(snapshot)
+
+    monkeypatch.setattr(backend, "_recommendations_unlocked", fake_unlocked)
+    monkeypatch.setattr(backend, "_latest_mode_snapshot", lambda *_args, **_kwargs: dict(snapshot) if snapshot else None)
+
+    async def scenario() -> tuple[dict, dict]:
+        prewarm = asyncio.create_task(backend._recommendations({}, {"limit": 1, "refresh": True}))
+        await asyncio.sleep(0.005)
+        page = asyncio.create_task(backend._recommendations({}, {"limit": 1, "refresh": False}))
+        return await prewarm, await page
+
+    _prewarm, page = asyncio.run(scenario())
+    assert calls == 1
+    assert page["cache_status"]["status"] == "coalesced"
+    assert page["items"] == [{"code": "AAA-001"}]
 
 
 def test_v42_library_profile_reuses_matching_core_revision(monkeypatch) -> None:
