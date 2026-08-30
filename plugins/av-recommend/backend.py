@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 57
-PERSONALIZED_MODEL_VERSION = "personal-v57"
+RECOMMENDATION_ALGORITHM_VERSION = 58
+PERSONALIZED_MODEL_VERSION = "personal-v58"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -4342,6 +4342,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     similarity_meta: dict[str, Any] = {}
     similarity_evaluation: dict[str, Any] = {}
     temporal_backtest: dict[str, Any] = {}
+    core_graph_timing: dict[str, float] = {}
     if source_mode == "full":
         candidates = [dict(item) for item in pool_items.values() if isinstance(item, dict)]
         warnings: list[str] = []
@@ -4366,14 +4367,24 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
 
     try:
         from app.knowledge.intelligence import work_similarity_candidates
+        core_timing_cursor = time.monotonic()
+
+        def mark_core_timing(stage: str) -> None:
+            nonlocal core_timing_cursor
+            now = time.monotonic()
+            core_graph_timing[stage] = round(now - core_timing_cursor, 3)
+            core_timing_cursor = now
+
         try:
             temporal_backtest = await work_similarity_temporal_backtest(profile.get("acquisition_times") or {})
         except Exception as exc:
             temporal_backtest = {"recommended_policy": "collecting", "error": str(exc), "evaluated": 0}
+        mark_core_timing("temporal_backtest")
         graph_profile = profile
         if temporal_backtest.get("recommended_policy") != "temporal":
             profile = await _library_profile(weight_policy="durable")
             graph_profile = profile
+        mark_core_timing("durable_profile")
         graph_seed_weights, graph_seed_sources = _positive_neighbor_seed_weights(graph_profile, behavior, store)
         try:
             similarity_evaluation = await work_similarity_recall_evaluation(
@@ -4382,6 +4393,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             )
         except Exception as exc:
             similarity_evaluation = {"error": str(exc), "evaluated": 0}
+        mark_core_timing("offline_evaluation")
         relation_weights = dict(((similarity_evaluation.get("relation_counterfactual") or {}).get("recommended_weights") or {}))
         similarity_meta = await work_similarity_candidates(
             graph_seed_weights or {code: 1.0 for code in profile.get("codes") or set()},
@@ -4389,6 +4401,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             relation_weights=relation_weights,
             limit=160,
         )
+        mark_core_timing("live_recall")
         similarity_meta["seed_sources"] = graph_seed_sources
         similarity_meta["relation_weights"] = relation_weights
         coverage_repairs = [
@@ -4438,6 +4451,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 existing["source_tags"] = tags
         similarity_meta["profile_gaps"] = Counter(gap for neighbor in (similarity_meta.get("items") or []) for gap in _candidate_profile_gaps(neighbor))
         similarity_meta["profile_enrichment_queued"] = _queue_profile_enrichment(config, [neighbor for neighbor in (similarity_meta.get("items") or []) if _candidate_profile_gaps(neighbor)])
+        mark_core_timing("merge_and_repair")
     except Exception as exc:
         warnings.append(f"Core 邻域召回暂不可用：{exc}")
     mark_timing("core_graph")
@@ -4593,6 +4607,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
                 "total": round(time.monotonic() - generation_started, 3),
             },
             "neighbor_recall": {
+                "timing": core_graph_timing,
                 "seeds": int(similarity_meta.get("seed_count") or 0),
                 "negative_seeds": int(similarity_meta.get("negative_seed_count") or 0),
                 "candidates": len(similarity_meta.get("items") or []),
