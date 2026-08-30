@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.database import async_session_maker
 from app.core.models import EmbyItemCache
 from app.core.runtime_paths import plugin_data_path
-from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, actor_mentions, canonical_actor_name, canonical_preference_category, clear_preference_events, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens, work_similarity_recall_evaluation, work_similarity_status, work_similarity_temporal_backtest
+from app.knowledge.intelligence import actor_alias_names, actor_alias_revision, actor_identity_key, actor_mentions, canonical_actor_name, canonical_preference_category, clear_preference_events, latest_work_similarity_evaluation, preference_behavior_summary, record_preference_event, search_intent_summary, semantic_tokens, work_similarity_recall_evaluation, work_similarity_status, work_similarity_temporal_backtest
 from app.knowledge.models import KnowledgeActionState, KnowledgeEdge, KnowledgeEntity, WorkProfile
 from app.plugins.contracts import PluginManifest, PluginTestResult
 
@@ -46,8 +46,8 @@ def _recommendation_cache_file() -> Path:
 
 
 TITLE_PROFILE_VERSION = 2
-RECOMMENDATION_ALGORITHM_VERSION = 59
-PERSONALIZED_MODEL_VERSION = "personal-v59"
+RECOMMENDATION_ALGORITHM_VERSION = 60
+PERSONALIZED_MODEL_VERSION = "personal-v60"
 STABLE_MODEL_VERSION = "stable-v1"
 RESOURCE_LEARNED_MODEL_VERSION = "resource-learned-v1"
 RESOURCE_FIXED_MODEL_VERSION = "resource-fixed-v1"
@@ -78,6 +78,7 @@ _pool_lock = asyncio.Lock()
 _recommendation_generation_locks = {"latest": asyncio.Lock(), "full": asyncio.Lock()}
 _recommendation_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
 _resource_enqueue_tasks: set[asyncio.Task[Any]] = set()
+_core_evaluation_task: asyncio.Task[None] | None = None
 _scheduler_task: asyncio.Task[None] | None = None
 _scheduler_stop: asyncio.Event | None = None
 _prewarm_state: dict[str, Any] = {"status": "idle", "last_started_at": None, "last_finished_at": None, "last_error": "", "modes": []}
@@ -658,6 +659,14 @@ manifest = _manifest()
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _parse_datetime(value: Any) -> dt.datetime | None:
+    try:
+        parsed = dt.datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=dt.timezone.utc) if parsed.tzinfo is None else parsed.astimezone(dt.timezone.utc)
 
 
 def _norm_code(value: Any) -> str:
@@ -2815,7 +2824,7 @@ async def start_background(_config: dict[str, Any] | None = None) -> None:
 
 
 async def stop_background() -> None:
-    global _scheduler_task, _scheduler_stop, _profile_enrichment_task, _title_profile_refresh_task
+    global _scheduler_task, _scheduler_stop, _profile_enrichment_task, _title_profile_refresh_task, _core_evaluation_task
     if _scheduler_stop:
         _scheduler_stop.set()
     if _scheduler_task:
@@ -2843,6 +2852,11 @@ async def stop_background() -> None:
     if _resource_enqueue_tasks:
         await asyncio.gather(*list(_resource_enqueue_tasks), return_exceptions=True)
     _resource_enqueue_tasks.clear()
+    if _core_evaluation_task:
+        _core_evaluation_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _core_evaluation_task
+    _core_evaluation_task = None
     _scheduler_stop = None
 
 
@@ -4388,10 +4402,9 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             core_graph_timing[stage] = round(now - core_timing_cursor, 3)
             core_timing_cursor = now
 
-        try:
-            temporal_backtest = await work_similarity_temporal_backtest(profile.get("acquisition_times") or {})
-        except Exception as exc:
-            temporal_backtest = {"recommended_policy": "collecting", "error": str(exc), "evaluated": 0}
+        temporal_backtest = latest_work_similarity_evaluation("temporal")
+        if not temporal_backtest:
+            temporal_backtest = {"recommended_policy": "collecting", "evaluated": 0, "stale": True}
         mark_core_timing("temporal_backtest")
         graph_profile = profile
         if temporal_backtest.get("recommended_policy") != "temporal":
@@ -4399,13 +4412,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             graph_profile = profile
         mark_core_timing("durable_profile")
         graph_seed_weights, graph_seed_sources = _positive_neighbor_seed_weights(graph_profile, behavior, store)
-        try:
-            similarity_evaluation = await work_similarity_recall_evaluation(
-                set(profile.get("codes") or []),
-                graph_seed_weights,
-            )
-        except Exception as exc:
-            similarity_evaluation = {"error": str(exc), "evaluated": 0}
+        similarity_evaluation = latest_work_similarity_evaluation("recall")
         mark_core_timing("offline_evaluation")
         relation_weights = dict(((similarity_evaluation.get("relation_counterfactual") or {}).get("recommended_weights") or {}))
         similarity_meta = await work_similarity_candidates(
@@ -4415,6 +4422,16 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
             limit=160,
         )
         mark_core_timing("live_recall")
+        persisted_at = _parse_datetime(temporal_backtest.get("persisted_at"))
+        temporal_stale = not persisted_at or (dt.datetime.now(dt.timezone.utc) - persisted_at).total_seconds() >= 86400
+        recall_stale = str(similarity_evaluation.get("revision") or "") != str(similarity_meta.get("revision") or "")
+        if temporal_stale or recall_stale:
+            _schedule_core_evaluation(
+                profile.get("acquisition_times") or {},
+                set(profile.get("codes") or []),
+                graph_seed_weights,
+            )
+        similarity_evaluation["stale"] = recall_stale
         similarity_meta["seed_sources"] = graph_seed_sources
         similarity_meta["relation_weights"] = relation_weights
         coverage_repairs = [
@@ -4682,6 +4699,26 @@ def _schedule_recommendation_refresh(config: dict[str, Any], payload: dict[str, 
             _recommendation_refresh_tasks.pop(task_key, None)
 
     _recommendation_refresh_tasks[task_key] = asyncio.create_task(refresh())
+
+
+def _schedule_core_evaluation(acquisition_times: dict[str, Any], target_codes: set[str], seed_weights: dict[str, float]) -> None:
+    """Refresh expensive diagnostics after the page response path is clear."""
+    global _core_evaluation_task
+    if _core_evaluation_task and not _core_evaluation_task.done():
+        return
+
+    async def refresh() -> None:
+        try:
+            await asyncio.sleep(5)
+            await work_similarity_temporal_backtest(dict(acquisition_times))
+            await work_similarity_recall_evaluation(set(target_codes), dict(seed_weights))
+            _invalidate_recommendation_cache(hard=False, reason="core-evaluation")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    _core_evaluation_task = asyncio.create_task(refresh())
 
 
 async def _recommendations(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
