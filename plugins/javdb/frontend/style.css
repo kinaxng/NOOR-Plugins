@@ -61,6 +61,24 @@
   opacity: .72;
   transition: opacity .18s ease;
 }
+.javdb-scroll-sentinel {
+  display: none;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--color-text-muted, rgba(255,255,255,.5));
+  font-size: 12px;
+  letter-spacing: .02em;
+}
+.javdb-scroll-sentinel__spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255,255,255,.16);
+  border-top-color: var(--color-brand, #0075ff);
+  border-radius: 999px;
+  animation: javdb-spin .8s linear infinite;
+}
 
 .javdb-grid--actors {
   display: grid;

@@ -137,6 +137,29 @@ def _extract_video_code(value: Any) -> str:
     return re.sub(r"[_ ]+", "-", match.group(1).upper())
 
 
+def _video_code_aliases(value: Any) -> list[str]:
+    """Return an ordered list of equivalent upstream video-code spellings.
+
+    DBOnline installations do not all use the same FC2 convention: one may
+    expose ``FC2-1234567`` while another only finds ``FC2-PPV-1234567``.
+    Preserve the caller's spelling first, then try the alternate form.
+    """
+    normalized = _extract_video_code(value) or _code(value)
+    normalized = re.sub(r"[_ ]+", "-", str(normalized or "").strip().upper())
+    if not normalized:
+        return []
+
+    aliases: list[str] = [normalized]
+    fc2_match = re.fullmatch(r"FC2(?:-?PPV)?-?(\d{4,9})", normalized, re.I)
+    if fc2_match:
+        number = fc2_match.group(1)
+        canonical = f"FC2-PPV-{number}" if "PPV" in normalized else f"FC2-{number}"
+        alternate = f"FC2-{number}" if "PPV" in normalized else f"FC2-PPV-{number}"
+        aliases.extend((canonical, alternate))
+
+    return list(dict.fromkeys(alias for alias in aliases if alias))
+
+
 def _movie_list(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, dict):
         for key in ("movies", "videos", "items", "results"):
@@ -241,7 +264,7 @@ async def _enrich_latest_item(config: dict[str, Any], item: dict[str, Any]) -> d
         enriched["raw"] = raw
         return enriched
     try:
-        detail = await _video(config, code)
+        detail = await _video_with_aliases(config, code)
     except Exception:
         raw["detail_enriched"] = True
         raw["detail_enrich_error"] = True
@@ -799,9 +822,15 @@ async def _resource_search(config: dict[str, Any], payload: dict[str, Any]) -> l
 
     if code:
         try:
-            video = await _video(config, code)
+            video = await _video_with_aliases(config, code, require_resources=True)
             if expected_magnets_count > 0 and len(video.get("magnets") or []) < expected_magnets_count:
-                video = await _video(config, code, refresh=True)
+                video = await _video_with_aliases(
+                    config,
+                    code,
+                    refresh=True,
+                    require_resources=True,
+                    min_magnets=expected_magnets_count,
+                )
             if video:
                 candidates.append(video)
         except Exception:
@@ -809,15 +838,28 @@ async def _resource_search(config: dict[str, Any], payload: dict[str, Any]) -> l
 
     if not candidates and (code or title or raw_keyword):
         keyword = code or title or str(raw_keyword or "").strip()
-        searched = await _search(config, keyword, 1, limit)
-        search_items = [item for item in (searched.get("items") or []) if isinstance(item, dict)]
+        search_items: list[dict[str, Any]] = []
+        search_error: Exception | None = None
+        search_succeeded = False
+        for search_keyword in _video_code_aliases(keyword) or [keyword]:
+            try:
+                searched = await _search(config, search_keyword, 1, limit)
+            except Exception as exc:
+                search_error = exc
+                continue
+            search_succeeded = True
+            search_items = [item for item in (searched.get("items") or []) if isinstance(item, dict)]
+            if search_items:
+                break
+        if search_error is not None and not search_succeeded:
+            raise search_error
 
         async def load_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
             item_code = _code(item.get("code") or item.get("number") or "")
             if not item_code:
                 return None
             try:
-                return await _video(config, item_code)
+                return await _video_with_aliases(config, item_code, require_resources=True)
             except Exception:
                 return None
 
@@ -871,9 +913,23 @@ async def _resource_search_paged(config: dict[str, Any], payload: dict[str, Any]
     search_page = 1
     exhausted = False
 
+    search_keywords = _video_code_aliases(keyword) or [keyword]
     while len(out) < target + 1 and search_page <= 20:
-        searched = await _search(config, keyword, search_page, movie_limit)
-        movies = [x for x in (searched.get("items") or []) if isinstance(x, dict)]
+        movies: list[dict[str, Any]] = []
+        search_error: Exception | None = None
+        search_succeeded = False
+        for search_keyword in search_keywords:
+            try:
+                searched = await _search(config, search_keyword, search_page, movie_limit)
+            except Exception as exc:
+                search_error = exc
+                continue
+            search_succeeded = True
+            movies = [x for x in (searched.get("items") or []) if isinstance(x, dict)]
+            if movies:
+                break
+        if search_error is not None and not search_succeeded:
+            raise search_error
         if not movies:
             exhausted = True
             break
@@ -882,7 +938,7 @@ async def _resource_search_paged(config: dict[str, Any], payload: dict[str, Any]
             if not item_code or int(movie.get("magnets_count") or 0) <= 0:
                 return None
             try:
-                return await _video(config, item_code)
+                return await _video_with_aliases(config, item_code, require_resources=True)
             except Exception:
                 return None
 
@@ -968,6 +1024,31 @@ async def _search(config: dict[str, Any], q: str, page: int = 1, limit: int = 24
     return {"items": items, "total": int(data.get("total") or len(items)) if isinstance(data, dict) else len(items), "raw": data}
 
 
+async def _search_with_aliases(config: dict[str, Any], query: Any, page: int = 1, limit: int = 24) -> dict[str, Any]:
+    """Search DBOnline using the caller's code and any equivalent aliases."""
+    keyword = str(query or "").strip()
+    if not keyword:
+        return {"items": [], "total": 0}
+    aliases = _video_code_aliases(keyword) or [keyword]
+    fallback: dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for alias in aliases:
+        try:
+            result = await _search(config, alias, page, limit)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if fallback is None:
+            fallback = result
+        if result.get("items"):
+            return result
+    if fallback is not None:
+        return fallback
+    if last_error is not None:
+        raise last_error
+    return {"items": [], "total": 0}
+
+
 async def _video(config: dict[str, Any], code: str, *, refresh: bool = False) -> dict[str, Any]:
     code_key = str(code or "").strip().upper()
     cache_key = (_base(config), code_key)
@@ -994,6 +1075,56 @@ async def _video(config: dict[str, Any], code: str, *, refresh: bool = False) ->
     return dict(out)
 
 
+def _video_has_resources(video: dict[str, Any]) -> bool:
+    magnets = video.get("magnets")
+    if isinstance(magnets, list) and magnets:
+        return True
+    return bool(_video_ed2ks(video))
+
+
+async def _video_with_aliases(
+    config: dict[str, Any],
+    value: Any,
+    *,
+    refresh: bool = False,
+    require_resources: bool = False,
+    min_magnets: int = 0,
+) -> dict[str, Any]:
+    """Load a video while tolerating upstream code aliases.
+
+    A valid but resource-less response is kept as a fallback, while an
+    alternate alias is still attempted when the caller needs resources. If
+    every request fails, propagate the last upstream error just like
+    ``_video`` historically did.
+    """
+    aliases = _video_code_aliases(value)
+    if not aliases:
+        return {}
+    fallback: dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for alias in aliases:
+        try:
+            detail = await _video(config, alias, refresh=True) if refresh else await _video(config, alias)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if not isinstance(detail, dict) or not detail:
+            continue
+        if fallback is None:
+            fallback = detail
+        magnets = detail.get("magnets") if isinstance(detail.get("magnets"), list) else []
+        enough_magnets = len(magnets) >= max(0, int(min_magnets or 0))
+        if (not require_resources and enough_magnets) or (require_resources and enough_magnets and _video_has_resources(detail)):
+            return detail
+        if not require_resources and min_magnets <= 0:
+            return detail
+    if fallback is not None:
+        return fallback
+    if last_error is not None:
+        raise last_error
+    return {}
+
+
 async def _related_movies(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     rel_type = str(payload.get("rel_type") or "").strip()
     rel_id = str(payload.get("rel_id") or payload.get("id") or "").strip()
@@ -1009,23 +1140,51 @@ async def _related_movies(config: dict[str, Any], payload: dict[str, Any]) -> di
         "director": "/directors/{id}/movies",
         "list": "/lists/{id}/movies",
     }
+    filter_aliases = {
+        "magnets": "m",
+        "magnet": "m",
+        "cnsub": "c",
+        "subtitle": "c",
+        "subtitles": "c",
+        "single": "s",
+        "single_actor": "s",
+    }
+    raw_filters = str(payload.get("filter") or "").strip()
+    remote_filters: list[str] = []
+    for raw_filter in raw_filters.split(","):
+        key = raw_filter.strip().lower()
+        mapped = filter_aliases.get(key, key)
+        if mapped in {"m", "c", "s"} and mapped not in remote_filters:
+            remote_filters.append(mapped)
+    relation_params: dict[str, Any] = {
+        "page": page,
+        "limit": limit,
+        "sort_by": sort_by,
+        "order_by": order_by,
+    }
+    if remote_filters:
+        relation_params["filter"] = ",".join(remote_filters)
+    if rel_type == "actor" and str(payload.get("year") or "").strip():
+        relation_params["year"] = str(payload.get("year") or "").strip()
     if rel_type == "category":
         data = _data(await _request(config, "GET", "/videos/filter", params={"category_id": rel_id, "page": page, "limit": limit}))
     elif rel_type in path_map:
-        data = _data(await _request(config, "GET", path_map[rel_type].format(id=rel_id), params={"page": page, "limit": limit, "sort_by": sort_by, "order_by": order_by, "filter": payload.get("filter") or ""}))
+        data = _data(await _request(config, "GET", path_map[rel_type].format(id=rel_id), params=relation_params))
     else:
         raise ValueError(f"unsupported relation type: {rel_type}")
-    items = [_normalize_movie(config, x) for x in _movie_list(data) if isinstance(x, dict)]
+    raw_items = _movie_list(data)
+    items = [_normalize_movie(config, x) for x in raw_items if isinstance(x, dict)]
     total = int(data.get("total") or data.get("total_count") or 0) if isinstance(data, dict) else 0
     if not total:
         # DBOnline's relation endpoint returns current_page/movies but no
         # total/has_more. Keep pagination alive while a full page is returned.
-        upstream_page_size = len(items)
+        upstream_page_size = len(raw_items)
         if upstream_page_size >= limit:
             total = page * limit + 1
         else:
             total = (page - 1) * limit + upstream_page_size
-    return {"ok": True, "items": items, "total": total, "raw": data}
+    has_more = bool(data.get("has_more")) if isinstance(data, dict) and "has_more" in data else len(raw_items) >= limit
+    return {"ok": True, "items": items, "total": total, "has_more": has_more, "raw": data}
 
 
 def _series_entries(value: Any) -> list[dict[str, str]]:
@@ -1060,7 +1219,7 @@ async def _series_options(config: dict[str, Any]) -> dict[str, Any]:
             return item, {}
         try:
             async with semaphore:
-                return item, await _video(config, code)
+                return item, await _video_with_aliases(config, code)
         except Exception:
             return item, {}
 
@@ -1361,10 +1520,12 @@ async def build_knowledge_contributions(config: dict[str, Any], limit: int = 100
     per_code = max(1, min(int(config.get("knowledge_search_per_code") or 8), 30))
     for code in codes[:max_codes]:
         try:
-            video = await _video(config, code)
+            video = await _video_with_aliases(config, code, require_resources=True)
         except Exception:
             continue
-        links = [_normalize_magnet(x, code) for x in (video.get("magnets") or []) if isinstance(x, dict)]
+        links = [
+            _normalize_magnet(x, code) for x in (video.get("magnets") or []) if isinstance(x, dict)
+        ]
         links.extend(_video_ed2ks(video))
         for idx, magnet in enumerate(links[:per_code]):
             item = _torrent_contribution(config, video, magnet, idx)
@@ -1384,14 +1545,20 @@ async def handle_action(action: str, payload: dict[str, Any], config: dict[str, 
     if action in {"rankings", "latest", "videos", "top250", "recommend"}:
         return await _list_action(config, action, payload)
     if action == "search":
-        return {"ok": True, **await _search(config, str(payload.get("q") or payload.get("keyword") or ""), int(payload.get("page") or 1), int(payload.get("limit") or 24))}
+        return {"ok": True, **await _search_with_aliases(config, str(payload.get("q") or payload.get("keyword") or ""), int(payload.get("page") or 1), int(payload.get("limit") or 24))}
     if action == "video":
         code = str(payload.get("code") or "")
         expected_magnets_count = int(payload.get("expected_magnets_count") or 0)
         refresh = bool(payload.get("refresh"))
-        data = await _video(config, code, refresh=refresh)
+        data = await _video_with_aliases(config, code, refresh=refresh, require_resources=True)
         if expected_magnets_count > 0 and len(data.get("magnets") or []) < expected_magnets_count:
-            data = await _video(config, code, refresh=True)
+            data = await _video_with_aliases(
+                config,
+                code,
+                refresh=True,
+                require_resources=True,
+                min_magnets=expected_magnets_count,
+            )
         return {"ok": True, "data": data}
     if action == "related_movies":
         return await _related_movies(config, payload)

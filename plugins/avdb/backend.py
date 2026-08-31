@@ -37,8 +37,26 @@ def _headers(config: dict[str, Any]) -> dict[str, str]:
 
 def _code(value: Any) -> str:
     text = str(value or "").upper().replace("_", "-")
+    fc2 = re.search(r"\bFC2(?:[- ]?PPV)?[- ]?(\d{4,9})\b", text, re.I)
+    if fc2:
+        prefix = "FC2-PPV" if re.search(r"FC2[- ]?PPV", fc2.group(0), re.I) else "FC2"
+        return f"{prefix}-{fc2.group(1)}"
     match = re.search(r"\b([A-Z]{2,10})[- ]?(\d{2,8})\b", text)
     return f"{match.group(1)}-{match.group(2)}" if match else ""
+
+
+def _code_aliases(value: Any) -> list[str]:
+    """Return equivalent code spellings for providers with FC2 aliases."""
+    code = _code(value)
+    if not code:
+        return []
+    aliases = [code]
+    match = re.fullmatch(r"FC2(?:-PPV)?-(\d{4,9})", code)
+    if match:
+        number = match.group(1)
+        alternate = f"FC2-{number}" if "PPV" in code else f"FC2-PPV-{number}"
+        aliases.append(alternate)
+    return list(dict.fromkeys(aliases))
 
 
 def _number(value: Any) -> int:
@@ -126,9 +144,26 @@ async def search_resources(query: dict[str, Any], config: dict[str, Any]) -> dic
     keyword = str(query.get("keyword") or query.get("q") or query.get("code") or query.get("number") or "").strip()
     if not keyword:
         return {"items": []}
-    payload = await _search(config, keyword)
     limit = max(1, min(_number(query.get("limit")) or 24, 100))
-    items = [_normalize(item, index) for index, item in enumerate(_list(payload))]
+    payload: dict[str, Any] = {}
+    raw_items: list[dict[str, Any]] = []
+    search_error: Exception | None = None
+    search_succeeded = False
+    for search_keyword in _code_aliases(keyword) or [keyword]:
+        try:
+            candidate = await _search(config, search_keyword)
+        except Exception as exc:
+            search_error = exc
+            continue
+        search_succeeded = True
+        candidate_items = _list(candidate)
+        payload = candidate
+        raw_items = candidate_items
+        if candidate_items:
+            break
+    if search_error is not None and not search_succeeded:
+        raise search_error
+    items = [_normalize(item, index) for index, item in enumerate(raw_items)]
     return {"items": [item for item in items if item][:limit], "raw": payload}
 
 

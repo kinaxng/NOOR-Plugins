@@ -682,8 +682,26 @@ async def test(config: dict[str, Any]) -> PluginTestResult:
 
 def _resource_code(value: Any) -> str:
     text = str(value or "").upper().replace("_", "-")
+    fc2 = re.search(r"\bFC2(?:[- ]?PPV)?[- ]?(\d{4,9})\b", text, re.I)
+    if fc2:
+        prefix = "FC2-PPV" if re.search(r"FC2[- ]?PPV", fc2.group(0), re.I) else "FC2"
+        return f"{prefix}-{fc2.group(1)}"
     match = re.search(r"\b([A-Z]{2,10})[- ]?(\d{2,8})\b", text)
     return f"{match.group(1)}-{match.group(2)}" if match else ""
+
+
+def _resource_code_aliases(value: Any) -> list[str]:
+    """Return equivalent code spellings for providers with FC2 aliases."""
+    code = _resource_code(value)
+    if not code:
+        return []
+    aliases = [code]
+    match = re.fullmatch(r"FC2(?:-PPV)?-(\d{4,9})", code)
+    if match:
+        number = match.group(1)
+        alternate = f"FC2-{number}" if "PPV" in code else f"FC2-PPV-{number}"
+        aliases.append(alternate)
+    return list(dict.fromkeys(aliases))
 
 
 def _resource_number(value: Any) -> int:
@@ -756,15 +774,33 @@ async def search_resources(query: dict[str, Any], config: dict[str, Any]) -> dic
     if not keyword:
         return {"items": []}
     limit = max(5, min(_resource_number(query.get("limit")) or 30, 100))
-    payload = await _mteam_post(config, "/api/torrent/search", json_body={
-        "pageNumber": max(1, _resource_number(query.get("page")) or 1),
-        "pageSize": limit,
-        "keyword": keyword,
-        "mode": "adult",
-        "status": "NORMAL",
-        "withCache": True,
-    })
-    resources = [_normalize_resource(config, item) for item in _resource_items(payload)]
+    page_number = max(1, _resource_number(query.get("page")) or 1)
+    payload: dict[str, Any] = {}
+    raw_items: list[dict[str, Any]] = []
+    search_error: Exception | None = None
+    search_succeeded = False
+    for search_keyword in _resource_code_aliases(keyword) or [keyword]:
+        try:
+            candidate = await _mteam_post(config, "/api/torrent/search", json_body={
+                "pageNumber": page_number,
+                "pageSize": limit,
+                "keyword": search_keyword,
+                "mode": "adult",
+                "status": "NORMAL",
+                "withCache": True,
+            })
+        except Exception as exc:
+            search_error = exc
+            continue
+        search_succeeded = True
+        candidate_items = _resource_items(candidate)
+        payload = candidate if isinstance(candidate, dict) else {}
+        raw_items = candidate_items
+        if candidate_items:
+            break
+    if search_error is not None and not search_succeeded:
+        raise search_error
+    resources = [_normalize_resource(config, item) for item in raw_items]
     return {"items": [item for item in resources if item], "raw": payload}
 
 

@@ -215,6 +215,8 @@ export async function mount(root, sdk) {
     page: 1,
     limit: 48,
     total: 0,
+    relationHasMore: true,
+    relationLoadingMore: false,
     items: [],
     loading: false,
     hasLoadedOnce: false,
@@ -229,6 +231,7 @@ export async function mount(root, sdk) {
 
   let tabControl = null
   let resizeTimer = null
+  let relationScrollObserver = null
   let loadSeq = 0
   const initialCode = new URLSearchParams(window.location.search).get('code')?.trim() || ''
   let initialCodeOpened = false
@@ -244,9 +247,11 @@ export async function mount(root, sdk) {
   const filtersWrap = el('div', 'javdb-filters-wrap')
   const grid = el('div', 'javdb-grid')
   const pager = el('div', 'javdb-pager')
+  const scrollSentinel = el('div', 'javdb-scroll-sentinel')
   header.append(tabsWrap, loadingStatus, panelWrap, filtersWrap)
-  page.append(header, grid, pager)
+  page.append(header, grid, scrollSentinel, pager)
   root.appendChild(page)
+  observeRelationScroll()
 
   const tabDefs = [
     { value: 'latest', label: '最近更新', path: 'latest' },
@@ -372,6 +377,64 @@ export async function mount(root, sdk) {
     renderFilters()
     renderGrid()
     renderPager()
+    renderScrollSentinel()
+  }
+
+  function relationActorRemoteFilter() {
+    if (state.relation?.relType !== 'actor') return ''
+    const filters = []
+    if (state.relationActorSelectedFilters.includes('magnets')) filters.push('m')
+    if (state.relationActorSelectedFilters.includes('cnsub')) filters.push('c')
+    if (state.relationActorSingleFilter) filters.push('s')
+    return filters.join(',')
+  }
+
+  function resetRelationActorResults() {
+    state.page = 1
+    state.relationHasMore = true
+    state.relationLoadingMore = false
+  }
+
+  function relationItemKey(item) {
+    return String(item?.id || item?.code || item?.number || '').trim().toLowerCase()
+  }
+
+  function appendRelationItems(items) {
+    const merged = [...state.items]
+    const seen = new Set(merged.map(relationItemKey).filter(Boolean))
+    for (const item of Array.isArray(items) ? items : []) {
+      const key = relationItemKey(item)
+      if (key && seen.has(key)) continue
+      if (key) seen.add(key)
+      merged.push(item)
+    }
+    return merged
+  }
+
+  function observeRelationScroll() {
+    relationScrollObserver?.disconnect?.()
+    relationScrollObserver = null
+    if (typeof IntersectionObserver === 'undefined') return
+    relationScrollObserver = new IntersectionObserver(entries => {
+      if (!entries[0]?.isIntersecting) return
+      if (!state.relation || state.relation.relType !== 'actor') return
+      if (state.loading || state.relationLoadingMore || !state.relationHasMore) return
+      void loadData({ append: true })
+    }, { rootMargin: '720px 0px' })
+    relationScrollObserver.observe(scrollSentinel)
+  }
+
+  function renderScrollSentinel() {
+    scrollSentinel.innerHTML = ''
+    const isActorRelation = state.relation?.relType === 'actor'
+    scrollSentinel.style.display = isActorRelation ? 'flex' : 'none'
+    if (!isActorRelation) return
+    if (state.relationLoadingMore) {
+      scrollSentinel.appendChild(el('span', 'javdb-scroll-sentinel__spinner'))
+      scrollSentinel.appendChild(el('span', '', '正在加载更多作品…'))
+    } else if (!state.relationHasMore && state.items.length) {
+      scrollSentinel.appendChild(el('span', '', '已加载全部作品'))
+    }
   }
 
   function usesRemotePaging() {
@@ -433,6 +496,8 @@ export async function mount(root, sdk) {
     state.rankingSelectedFilters = []
     state.top250Year = ''
     state.relation = null
+    state.relationHasMore = true
+    state.relationLoadingMore = false
     if (next === 'actors') void ensureVideoActors()
     if (next === 'videos') void ensureVideoCategories()
     if (next === 'videos') void ensureVideoActors()
@@ -455,7 +520,7 @@ export async function mount(root, sdk) {
     state.relationActorYear = ''
     state.relationActorSort = 'release_desc'
     relationActorGenreFilters = []
-    state.page = 1
+    resetRelationActorResults()
     if (options.syncRoute !== false && sdk.route?.push) {
       syncingRoute = true
       sdk.route.push(relationPath(relType, relId, label))
@@ -492,6 +557,8 @@ export async function mount(root, sdk) {
     if (tab && state.relation) {
       state.relation = null
       state.relationActorMeta = null
+      state.relationHasMore = true
+      state.relationLoadingMore = false
       state.page = 1
       loadData()
       renderTabs()
@@ -976,35 +1043,35 @@ export async function mount(root, sdk) {
     quickItems.appendChild(chip('全部', state.relationActorSelectedFilters.length === 0 && !state.relationActorSingleFilter, () => {
       state.relationActorSelectedFilters = []
       state.relationActorSingleFilter = false
-      state.page = 1
-      rerenderCurrentList()
+      resetRelationActorResults()
+      loadData()
     }))
     relationActorBadgeFilters.forEach(([value, label]) => {
       quickItems.appendChild(chip(label, state.relationActorSelectedFilters.includes(value), () => {
         state.relationActorSelectedFilters = state.relationActorSelectedFilters.includes(value)
           ? state.relationActorSelectedFilters.filter(x => x !== value)
           : [...state.relationActorSelectedFilters, value]
-        state.page = 1
-        rerenderCurrentList()
+        resetRelationActorResults()
+        loadData()
       }))
     })
     quickItems.appendChild(chip('单人', state.relationActorSingleFilter, () => {
       state.relationActorSingleFilter = !state.relationActorSingleFilter
-      state.page = 1
-      rerenderCurrentList()
+      resetRelationActorResults()
+      loadData()
     }))
     quickItems.appendChild(el('div', 'javdb-filter-divider'))
 
     const yearOptions = [{ label: '全部年份', value: '' }, ...actorRelationYears().map(year => ({ label: year, value: year }))]
     const relationYearSelect = selectBadge('年份', state.relationActorYear, yearOptions, value => {
       state.relationActorYear = String(value || '')
-      state.page = 1
-      rerenderCurrentList()
+      resetRelationActorResults()
+      loadData()
     })
     const relationSortSelect = selectBadge('排序', state.relationActorSort, relationActorSortOptions, value => {
       state.relationActorSort = String(value || 'release_desc')
-      state.page = 1
-      rerenderCurrentList()
+      resetRelationActorResults()
+      loadData()
     })
     quickItems.appendChild(relationYearSelect)
     quickItems.appendChild(relationSortSelect)
@@ -1018,16 +1085,16 @@ export async function mount(root, sdk) {
       const genreItems = el('div', 'javdb-actor-panel__items')
       genreItems.appendChild(chip('全部', relationActorGenreFilters.length === 0, () => {
         relationActorGenreFilters = []
-        state.page = 1
-        rerenderCurrentList()
+        resetRelationActorResults()
+        loadData()
       }))
       genreFilters.forEach(item => {
         genreItems.appendChild(chip(`${item.name} ${item.count}`, relationActorGenreFilters.includes(item.name), () => {
           relationActorGenreFilters = relationActorGenreFilters.includes(item.name)
             ? relationActorGenreFilters.filter(name => name !== item.name)
             : [...relationActorGenreFilters, item.name]
-          state.page = 1
-          rerenderCurrentList()
+          resetRelationActorResults()
+          loadData()
         }))
       })
       genres.appendChild(genreItems)
@@ -1068,7 +1135,7 @@ export async function mount(root, sdk) {
             state.relationActorSelectedFilters = []
             state.relationActorSingleFilter = false
             relationActorGenreFilters = []
-            state.page = 1
+            resetRelationActorResults()
             loadData()
             renderTabs()
           }),
@@ -1319,15 +1386,24 @@ export async function mount(root, sdk) {
     }
   }
 
-  async function loadData() {
+  async function loadData(options = {}) {
+    const append = Boolean(options?.append && state.relation?.relType === 'actor')
+    if (append && (state.loading || state.relationLoadingMore || !state.relationHasMore)) return
     const seq = ++loadSeq
     estimatePageSize()
+    const requestPage = append ? Math.max(1, state.page + 1) : state.page
     const hadContent = state.hasLoadedOnce && state.items.length > 0
-    state.loading = true
+    if (append) {
+      state.relationLoadingMore = true
+    } else {
+      state.loading = true
+      if (state.relation?.relType === 'actor') state.relationHasMore = true
+    }
     state.loadError = ''
     renderLoadingStatus()
     renderFilters()
     renderGrid()
+    renderScrollSentinel()
     try {
       const remoteLatestFilter = latestRemoteFilter()
       const action = state.relation
@@ -1340,7 +1416,7 @@ export async function mount(root, sdk) {
             : state.tab
         )
       const payload = {
-        page: state.page,
+        page: requestPage,
         limit: state.limit,
         ...(state.relation ? { rel_type: state.relation.relType, rel_id: state.relation.relId } : {}),
         ...(state.tab === 'latest' ? { type: state.latestType, filter_by: remoteLatestFilter, filters: [...state.latestSelectedFilters], sort_by: state.latestSort || 'update' } : {}),
@@ -1365,15 +1441,34 @@ export async function mount(root, sdk) {
       if (state.relation?.relType === 'actor') {
         payload.sort_by = 'release'
         payload.order_by = 'desc'
+        const remoteFilter = relationActorRemoteFilter()
+        if (remoteFilter) payload.filter = remoteFilter
+        if (state.relationActorYear) payload.year = state.relationActorYear
       }
       const res = await sdk.api.post(`/plugins/javdb/actions/${action}`, { payload })
       if (seq !== loadSeq) return
-      state.items = res.data.items || []
-      state.total = Number(res.data.total || state.items.length)
+      const incomingItems = Array.isArray(res.data.items) ? res.data.items : []
+      if (append) {
+        state.items = appendRelationItems(incomingItems)
+        state.page = requestPage
+      } else {
+        state.items = incomingItems
+      }
+      if (state.relation?.relType === 'actor') {
+        state.relationHasMore = res.data.has_more !== undefined
+          ? Boolean(res.data.has_more)
+          : incomingItems.length >= state.limit
+        state.total = state.items.length
+      } else {
+        state.total = Number(res.data.total || state.items.length)
+      }
       state.seriesSampleSize = state.tab === 'series' ? Number(res.data.sample_size || 0) : 0
       state.hasLoadedOnce = true
-      if (state.items.length && (state.relation?.relType === 'actor' || (state.tab === 'latest' && remoteLatestFilter !== 'all'))) {
-        await enrichWorkItems(state.items)
+      const itemsToEnrich = append ? incomingItems : state.items
+      const needsCrackedEnrichment = state.relation?.relType === 'actor'
+        && state.relationActorSelectedFilters.includes('cracked')
+      if (itemsToEnrich.length && (needsCrackedEnrichment || (state.tab === 'latest' && remoteLatestFilter !== 'all'))) {
+        await enrichWorkItems(itemsToEnrich)
         if (seq !== loadSeq) return
       }
       await loadSubscriptionStates()
@@ -1391,10 +1486,13 @@ export async function mount(root, sdk) {
     }
     if (seq !== loadSeq) return
     state.loading = false
+    state.relationLoadingMore = false
     renderLoadingStatus()
     renderFilters()
     renderGrid()
     renderPager()
+    renderScrollSentinel()
+    if (state.relation?.relType === 'actor') observeRelationScroll()
     if (initialCode && !initialCodeOpened) {
       initialCodeOpened = true
       void openDetail({ code: initialCode, number: initialCode, id: initialCode })
@@ -1522,6 +1620,7 @@ export async function mount(root, sdk) {
 
   function renderPager() {
     pager.innerHTML = ''
+    if (state.relation?.relType === 'actor') return
     let totalItems = Number(state.total || 0)
     if (isActorDirectoryFrame()) {
       totalItems = filteredItems().length
@@ -1907,6 +2006,8 @@ export async function mount(root, sdk) {
     loadSeq += 1
     window.removeEventListener('resize', onResize)
     clearTimeout(resizeTimer)
+    relationScrollObserver?.disconnect?.()
+    relationScrollObserver = null
     chooserState.modal?.close?.()
     chooserState.modal = null
     state.activePanel?.close()
