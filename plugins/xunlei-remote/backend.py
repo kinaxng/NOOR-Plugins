@@ -16,7 +16,7 @@ from app.plugins.contracts import PluginTestResult
 
 PLUGIN_ID = "xunlei-remote"
 DEFAULT_ENTRY_PATH = "/webman/3rdparty/pan-xunlei-com/index.cgi/"
-DEFAULT_SAVE_PATH = "/data/download/av/"
+DEFAULT_SAVE_PATH = "/downloads/xunlei/"
 DEFAULT_RESTORE_SCAN_ROOTS: list[str] = []
 DEFAULT_RESTORE_PATH_MAPPINGS: list[tuple[str, str]] = []
 _speed_scheduler_task: asyncio.Task[None] | None = None
