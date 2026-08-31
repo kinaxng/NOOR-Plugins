@@ -116,6 +116,15 @@ class Client115:
             value = value[0] if value else {}
         return normalize_file_info(value if isinstance(value, dict) else {})
 
+    async def create_folder(self, parent_id: str, name: str) -> dict[str, str]:
+        folder_name = str(name or "").strip()
+        if not folder_name or "/" in folder_name or "\\" in folder_name:
+            raise ValueError("invalid 115 folder name")
+        value = await self.request("POST", "/open/folder/add", data={"pid": str(parent_id or "0"), "file_name": folder_name})
+        if not isinstance(value, dict) or not value.get("file_id"):
+            raise Error115(0, "115 did not return the created folder ID")
+        return {"file_id": str(value.get("file_id") or ""), "name": str(value.get("file_name") or folder_name)}
+
     async def download_url(self, pick_code: str, *, user_agent: str = "") -> dict[str, Any]:
         effective_user_agent = str(user_agent or self.user_agent)[:512]
         value = await self.request("POST", "/open/ufile/downurl", data={"pick_code": pick_code}, headers={"User-Agent": effective_user_agent})

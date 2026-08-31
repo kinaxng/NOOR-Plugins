@@ -302,6 +302,8 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         return await Client115(config).list_folder(str(payload.get("folder_id") or config.get("offline_directory_id") or "0"), offset=int(payload.get("offset") or 0), limit=int(payload.get("limit") or 200))
     if action == "file_info":
         return await Client115(config).file_info(str(payload.get("file_id") or ""))
+    if action == "create_folder":
+        return await Client115(config).create_folder(str(payload.get("parent_id") or "0"), str(payload.get("name") or ""))
     if action == "tasks":
         return {"items": [task_dict(task) for task in await asyncio.to_thread(list_tasks, active_only=False, limit=int(payload.get("limit") or 100))]}
     if action == "sync_tasks":
