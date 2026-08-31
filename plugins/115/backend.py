@@ -272,6 +272,12 @@ async def stop_background() -> None:
     _pipeline_stop = None
 
 
+async def on_config_updated(config: dict[str, Any]) -> None:
+    """Restart workers so they never retain a stale configuration snapshot."""
+    await stop_background()
+    await start_background(dict(config))
+
+
 async def handle_action(action: str, config: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
     if action in {"status", "account"}:
