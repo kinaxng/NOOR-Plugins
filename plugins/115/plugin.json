@@ -1,7 +1,7 @@
 {
   "id": "115",
   "name": "115",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "downloader",
   "description": "115 Open Platform 离线下载、稳定 STRM 与媒体情报流水线。",
   "tags": ["115", "cloud", "downloader", "strm", "mediainfo"],

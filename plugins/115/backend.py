@@ -13,7 +13,7 @@ from .services.client import Client115, Error115, PLUGIN_ID, normalize_file
 from .services.offline import add_urls, list_remote_tasks
 from .services.mediainfo import enqueue as enqueue_mediainfo, process_next as process_next_mediainfo
 from .services.pipeline import process_pipeline_once
-from .services.storage import acknowledge_event, create_task, emit_event, find_duplicate, init_storage, list_events, list_media, list_tasks, media_dict, recover_interrupted_mediainfo, source_identity, task_dict, update_task, upsert_media, utcnow
+from .services.storage import acknowledge_event, create_task, emit_event, find_duplicate, get_task, init_storage, list_events, list_media, list_tasks, media_dict, recover_interrupted_mediainfo, source_identity, task_dict, update_task, upsert_media, utcnow
 from .services.strm import create_strm, is_media_file, resolve_stream as resolve_stream_service
 
 _auth_sessions: dict[str, dict[str, Any]] = {}
@@ -314,6 +314,16 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
         return {"items": [task_dict(task) for task in await asyncio.to_thread(list_tasks, active_only=False, limit=int(payload.get("limit") or 100))]}
     if action == "sync_tasks":
         return await sync_offline_tasks(config)
+    if action == "retry_pipeline":
+        task_id = str(payload.get("task_id") or payload.get("info_hash") or "")
+        task = await asyncio.to_thread(get_task, task_id)
+        if not task:
+            raise LookupError("115 offline task not found")
+        if task.status != "completed":
+            raise ValueError("only completed tasks can retry the media pipeline")
+        task = await asyncio.to_thread(update_task, task.info_hash, pipeline_status="pending", error_message="")
+        detected = await discover_completed_task(config, task)
+        return {"ok": True, "task_id": task.id, "detected_file_ids": detected}
     if action == "media":
         return {"items": [media_dict(item) for item in await asyncio.to_thread(list_media, int(payload.get("limit") or 200))]}
     if action == "pipeline_events":

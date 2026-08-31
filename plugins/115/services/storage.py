@@ -149,6 +149,12 @@ def find_duplicate(source_digest: str) -> OfflineTask | None:
         return session.scalar(select(OfflineTask).where(OfflineTask.source_digest == source_digest))
 
 
+def get_task(task_id: str) -> OfflineTask | None:
+    init_storage()
+    with Session() as session:
+        return session.scalar(select(OfflineTask).where((OfflineTask.id == str(task_id)) | (OfflineTask.info_hash == str(task_id))))
+
+
 def create_task(*, info_hash: str, source_digest: str, source_kind: str, source_hint: str, name: str, target_directory_id: str, context: dict[str, Any]) -> OfflineTask:
     init_storage()
     task = OfflineTask(
