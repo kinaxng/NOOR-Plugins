@@ -24,7 +24,7 @@
     "authorization": "",
     "pan_auth": "",
     "insecure_skip_verify": true,
-    "savepath": "",
+    "savepath": "/data/download/av/",
     "restore_scan_roots": "",
     "restore_path_mappings": "",
     "timeout": 30,

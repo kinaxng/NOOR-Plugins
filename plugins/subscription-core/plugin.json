@@ -29,6 +29,6 @@
     "default_mode": "loose",
     "default_require_cracked": false,
     "default_require_subtitle": false,
-    "default_savepath": ""
+    "default_savepath": "/data/download/av"
   }
 }

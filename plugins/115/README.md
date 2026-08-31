@@ -28,7 +28,7 @@ OAuth token 只在后端使用，通过 NOOR 插件 secret store 加密保存，
 ## 关键配置
 
 - `offline_directory_id`：115 默认离线目录 ID；不是 FUSE 路径。
-- `strm_directory`：NAS 上的本地 incoming 目录，例如 `/data/strm/incoming`。
+- `strm_directory`：NAS 上的本地 AV incoming 目录，例如 `/data/strm/av/incoming`。
 - `public_base_url`：Emby/ffprobe 能访问的 NOOR 地址，例如 `https://noor.example`。
 - `media_extensions`：完成目录内允许生成 STRM 的媒体扩展名。
 - `discovery_max_depth` / `discovery_max_items`：单个完成任务的有界发现范围。
@@ -36,7 +36,7 @@ OAuth token 只在后端使用，通过 NOOR 插件 secret store 加密保存，
 - `mediainfo_enabled` / `mediainfo_concurrency`：只对新媒体 probe；默认并发 1。
 - `mediainfo_timeout` / `mediainfo_retry_limit`：超时和指数退避重试上限。
 - 115 插件不会提交 MDC-NG 任务，也不会替 MDC-NG 判断 AV、UC 或 porn 分类。
-- 请在 MDC-NG 中把容器内的 `/data/strm/incoming` 加为监控目录；MDC-NG 负责读取 STRM、分类、刮削和硬链接。
+- 请在 MDC-NG 中把容器内的 `/data/strm/av/incoming` 加为监控目录；MDC-NG 负责读取 STRM、分类、刮削和硬链接。
 
 ## STRM 与播放
 
@@ -94,5 +94,5 @@ NOOR 的 Emby adapter 仍可被其他受支持流程使用；115 插件不直接
 - resolver 403：STRM 中 scoped token 已撤销或插件数据被重建，重新生成 STRM。
 - resolver 404：云文件已删除，或旧记录缺失 pick code。
 - ffprobe retry/failed：先用同一 STRM URL 做 Range smoke test，再检查 115 风控和网络可达性。
-- `MDC-NG 未发现 STRM`：确认 NOOR 的 `strm_directory` 与 MDC-NG 的路径映射/监控目录对应（例如 NOOR `/home/kinax/Videos/strm/incoming` → MDC `/data/strm/incoming`）。
+- `MDC-NG 未发现 STRM`：确认 NOOR 的 `strm_directory` 与 MDC-NG 的路径映射/监控目录对应（例如 NOOR `/home/kinax/Videos/strm/av/incoming` → MDC `/data/strm/av/incoming`）。
 - `MDC-NG 分类不正确`：分类属于 MDC-NG 的监控目录配置和命名规则，不由 115 插件决定。

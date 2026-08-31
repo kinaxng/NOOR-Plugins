@@ -475,7 +475,7 @@ export async function mount(el, sdk = {}) {
     }
     if (!ce.open) return false
     const content = document.createElement('div')
-    content.innerHTML = `<label class="qb-modal-field"><span>分类名称</span><input data-role="catName" class="qb-input" value="${esc(ce.name)}" ${ce.mode === 'edit' ? 'readonly' : ''}></label><label class="qb-modal-field"><span>保存路径</span><input data-role="catPath" class="qb-input" value="${esc(ce.savePath)}" placeholder="/downloads/av"></label>`
+    content.innerHTML = `<label class="qb-modal-field"><span>分类名称</span><input data-role="catName" class="qb-input" value="${esc(ce.name)}" ${ce.mode === 'edit' ? 'readonly' : ''}></label><label class="qb-modal-field"><span>保存路径</span><input data-role="catPath" class="qb-input" value="${esc(ce.savePath)}" placeholder="/data/download/av"></label>`
     const name = content.querySelector('[data-role="catName"]')
     const path = content.querySelector('[data-role="catPath"]')
     name.oninput = e => { ce.name = e.target.value }
@@ -597,7 +597,7 @@ export async function mount(el, sdk = {}) {
     try {
       state.downloadOptions = await call('download_options')
     } catch {}
-    const defaultPath = state.downloadOptions?.default_savepath || '/downloads/av'
+    const defaultPath = state.downloadOptions?.default_savepath || '/data/download/av'
     const defaultCategory = state.downloadOptions?.default_category || ''
     const urlInput = sdk.ui?.textarea
       ? sdk.ui.textarea({ placeholder: '每行一个 magnet / BT URL / 普通 URL，最多 50 条', rows: 6, className: 'qb-textarea' })

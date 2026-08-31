@@ -132,12 +132,12 @@ export async function mount(el, sdk = {}) {
     fields.className = 'mdc-fields'
 
     const sourceControl = sdk.ui?.textarea
-      ? sdk.ui.textarea({ value: state.sourcePaths, rows: 7, placeholder: '/data/downloads/av\n/data/downloads/av/ABC-123', onInput: value => { state.sourcePaths = value } })
+      ? sdk.ui.textarea({ value: state.sourcePaths, rows: 7, placeholder: '/data/download/av\n/data/download/av/ABC-123', onInput: value => { state.sourcePaths = value } })
       : (() => {
           const input = document.createElement('textarea')
           input.rows = 7
           input.value = state.sourcePaths
-          input.placeholder = '/data/downloads/av'
+          input.placeholder = '/data/download/av'
           input.oninput = e => { state.sourcePaths = e.target.value }
           return input
         })()
