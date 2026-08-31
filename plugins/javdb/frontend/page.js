@@ -1485,12 +1485,12 @@ export async function mount(root, sdk) {
       if (itemsToEnrich.length && (needsCrackedEnrichment || (state.tab === 'latest' && remoteLatestFilter !== 'all'))) {
         await enrichWorkItems(itemsToEnrich)
         if (seq !== loadSeq) return
-      } else if (itemsToEnrich.length && state.relation?.relType === 'actor') {
-        // The relation endpoint exposes magnet counts but not ED2K counts. Fetch
-        // details in the background so cards can show the complete resource
-        // summary without delaying the first render of an actor page.
+      } else if (itemsToEnrich.length && !isActorRankingFrame() && !isActorDirectoryFrame() && !isSeriesDirectoryFrame()) {
+        // List endpoints expose only a partial resource summary. Enrich every
+        // work-card list in the background so cracked, subtitle and ED2K badges
+        // stay consistent with the work detail without delaying first paint.
         void enrichWorkItems(itemsToEnrich).then(() => {
-          if (seq !== loadSeq || state.loading || state.relation?.relType !== 'actor') return
+          if (seq !== loadSeq || state.loading) return
           renderGrid()
           renderScrollSentinel()
         })
@@ -1849,6 +1849,16 @@ export async function mount(root, sdk) {
       }).filter(resource => resource.url)
       const fallbackAllResources = [...fallbackResources, ...fallbackEd2kResources]
       const sortResources = list => list.slice().sort((a, b) => {
+          const featureRank = resource => {
+            const cracked = !!resource?.features?.is_cracked
+            const subtitle = !!resource?.features?.has_subtitle
+            if (cracked && subtitle) return 0
+            if (cracked) return 1
+            if (subtitle) return 2
+            return 3
+          }
+          const featureDiff = featureRank(a) - featureRank(b)
+          if (featureDiff) return featureDiff
           const providerDiff = resourceProviderOrder(a) - resourceProviderOrder(b)
           if (providerDiff) return providerDiff
           const subA = String(a?.subtitle || '')

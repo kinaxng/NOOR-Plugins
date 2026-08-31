@@ -748,7 +748,29 @@ def _normalize_resource(config: dict[str, Any], item: dict[str, Any]) -> dict[st
         _resource_code(item.get("dmmCode")),
     ) if value), "")
     discount = str(item.get("discount") or item.get("discountType") or "")
-    tags = ["PT", *([discount] if discount else []), *(["置顶"] if item.get("sticky") else [])]
+    resource_labels: list[str] = []
+    for value in (item.get("labelsNew"), item.get("tags")):
+        if isinstance(value, list):
+            resource_labels.extend(str(label).strip() for label in value if str(label or "").strip())
+        elif value and not str(value).isdigit():
+            resource_labels.append(str(value).strip())
+    feature_text = " ".join([
+        title,
+        str(item.get("smallDescr") or ""),
+        str(item.get("description") or ""),
+        *resource_labels,
+    ])
+    has_subtitle = bool(
+        item.get("hasChineseSubtitle")
+        or item.get("has_subtitle")
+        or re.search(r"中字|中文字幕|中文|字幕|\b(?:chs|cht)\b", feature_text, re.I)
+    )
+    is_cracked = bool(
+        item.get("is_cracked")
+        or item.get("uncensored")
+        or re.search(r"破解|无码|無碼|無修正|流出|uncensored|crack|leak", feature_text, re.I)
+    )
+    tags = list(dict.fromkeys(["PT", *resource_labels, *([discount] if discount else []), *(["置顶"] if item.get("sticky") else [])]))
     return {
         "id": f"mteam:{torrent_id}",
         "kind": "torrent",
@@ -761,7 +783,7 @@ def _normalize_resource(config: dict[str, Any], item: dict[str, Any]) -> dict[st
         "tags": tags,
         "cover_url": str(item.get("poster") or item.get("image") or item.get("cover") or ""),
         "source_url": str(item.get("detailUrl") or item.get("detail_url") or ""),
-        "features": {"has_subtitle": False, "is_cracked": False, "is_private_tracker": True},
+        "features": {"has_subtitle": has_subtitle, "is_cracked": is_cracked, "is_private_tracker": True},
         "requirements": {"accepts_private_tracker": True, "accepts_http_torrent": True},
         "compatible_downloaders": ["qbittorrent", "transmission"],
         "preferred_downloader": "qbittorrent",

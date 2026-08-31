@@ -98,9 +98,26 @@ def _normalize(item: dict[str, Any], index: int) -> dict[str, Any] | None:
     code = _code(item.get("code") or item.get("number") or title)
     tags_raw = item.get("tags") or item.get("labels") or []
     tags = [str(value).strip() for value in tags_raw] if isinstance(tags_raw, list) else [str(tags_raw).strip()] if tags_raw else []
-    feature_text = " ".join([title, *tags])
-    is_cracked = bool(re.search(r"破解|uncensored\s*(?:crack|leak)|crack|leak|流出", feature_text, re.I))
-    has_subtitle = bool(re.search(r"中字|中文字幕|中文|字幕|\b(?:chs|cht)\b", feature_text, re.I))
+    feature_text = " ".join([
+        title,
+        *tags,
+        str(item.get("site") or ""),
+        str(item.get("section") or ""),
+        str(item.get("category") or ""),
+        str(item.get("smallDescr") or item.get("small_description") or ""),
+    ])
+    is_cracked = bool(
+        item.get("uc")
+        or item.get("is_cracked")
+        or item.get("uncensored")
+        or re.search(r"破解|uncensored\s*(?:crack|leak)?|crack|leak|流出", feature_text, re.I)
+    )
+    has_subtitle = bool(
+        item.get("chinese")
+        or item.get("has_subtitle")
+        or item.get("hasChineseSubtitle")
+        or re.search(r"中字|中文字幕|中文|字幕|\b(?:chs|cht)\b", feature_text, re.I)
+    )
     private = bool(item.get("private") or item.get("is_private") or item.get("private_tracker"))
     requirements: dict[str, bool] = {}
     if url.startswith("magnet:?"):
