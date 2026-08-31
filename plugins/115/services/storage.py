@@ -301,7 +301,9 @@ def media_dict(media: MediaFile) -> dict[str, Any]:
         "strm_status": record.status if record else "pending",
         "strm_path": record.local_path if record else "",
         "mediainfo_status": info.status if info else "pending",
-        "emby_status": "pending",
+        # Organization and Emby discovery are owned by MDC-NG's incoming
+        # folder watcher, not by this cloud provider.
+        "emby_status": "delegated",
     }
 
 
