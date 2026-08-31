@@ -757,6 +757,9 @@ export async function mount(root, sdk) {
           current.actor_count = Array.isArray(detail.actors) ? detail.actors.length : Number(current.actor_count || 0)
           current.has_cnsub = !!(current.has_cnsub || current.play_subtitle || detectCnsub(detail))
           current.is_cracked = !!(current.is_cracked || detectCracked(detail))
+          current.ed2ks_count = Array.isArray(detail.ed2ks)
+            ? detail.ed2ks.length
+            : Number(detail.ed2ks_count || detail.ed2k_count || current.ed2ks_count || 0)
           if (detail.library && typeof detail.library === 'object') current.library = detail.library
           current.__detailEnriched = true
         } catch {
@@ -1482,6 +1485,15 @@ export async function mount(root, sdk) {
       if (itemsToEnrich.length && (needsCrackedEnrichment || (state.tab === 'latest' && remoteLatestFilter !== 'all'))) {
         await enrichWorkItems(itemsToEnrich)
         if (seq !== loadSeq) return
+      } else if (itemsToEnrich.length && state.relation?.relType === 'actor') {
+        // The relation endpoint exposes magnet counts but not ED2K counts. Fetch
+        // details in the background so cards can show the complete resource
+        // summary without delaying the first render of an actor page.
+        void enrichWorkItems(itemsToEnrich).then(() => {
+          if (seq !== loadSeq || state.loading || state.relation?.relType !== 'actor') return
+          renderGrid()
+          renderScrollSentinel()
+        })
       }
       await loadSubscriptionStates()
       if (seq !== loadSeq) return
@@ -1601,6 +1613,8 @@ export async function mount(root, sdk) {
       const badges = []
       const magnetText = magnetLabel(item)
       if (magnetText) badges.push(sdk.ui.badge({ label: magnetText, tone: 'info' }))
+      const ed2kCount = Number(item?.ed2ks_count || item?.ed2k_count || 0)
+      if (ed2kCount > 0) badges.push(sdk.ui.badge({ label: `${ed2kCount} ED2K`, tone: 'info' }))
       if (item.has_cnsub || item.play_subtitle) badges.push(sdk.ui.badge({ label: '中字', tone: 'success' }))
       if (item.is_cracked) badges.push(sdk.ui.badge({ label: '破解', tone: 'danger' }))
       if (item.library?.in_library) badges.push(sdk.ui.badge({ label: '已入库', tone: 'info' }))
@@ -1873,6 +1887,7 @@ export async function mount(root, sdk) {
       magnetSection.appendChild(magnetHead)
       const magnetList = el('div', 'javdb-magnets')
       const providerBar = el('div', 'javdb-resource-providers')
+      const allProviderKey = '__all__'
       let providerGroups = []
       let selectedProvider = ''
 
@@ -1890,9 +1905,13 @@ export async function mount(root, sdk) {
           existing.isPrivateTracker = existing.isPrivateTracker || !!resource?.features?.is_private_tracker
           providerMap.set(key, existing)
         })
-        providerGroups = Array.from(providerMap.values()).sort((a, b) => resourceProviderOrder(a) - resourceProviderOrder(b))
+        const providers = Array.from(providerMap.values()).sort((a, b) => resourceProviderOrder(a) - resourceProviderOrder(b))
+        providerGroups = resources.length
+          ? [{ key: allProviderKey, label: '全部', count: resources.length, isPrivateTracker: false }, ...providers]
+          : providers
         if (!keepSelection || !providerGroups.some(group => group.key === selectedProvider)) {
-          selectedProvider = providerGroups[0]?.key || ''
+          const hasEd2k = resources.some(resource => String(resource?.kind || '').toLowerCase() === 'ed2k')
+          selectedProvider = hasEd2k ? allProviderKey : (providerGroups[0]?.key || '')
         }
       }
 
@@ -1917,7 +1936,9 @@ export async function mount(root, sdk) {
       function renderResourceList() {
         magnetCount.textContent = `${resources.length}`
         magnetList.innerHTML = ''
-        const visibleResources = resources.filter(resource => String(resource.provider || resource.provider_label || 'other') === selectedProvider)
+        const visibleResources = selectedProvider === allProviderKey
+          ? resources
+          : resources.filter(resource => String(resource.provider || resource.provider_label || 'other') === selectedProvider)
         if (!visibleResources.length) {
           magnetList.appendChild(el('div', 'javdb-no-data', '暂无下载资源'))
           return
@@ -1978,7 +1999,7 @@ export async function mount(root, sdk) {
         if (state.activePanel !== panel) return
         const brokerResources = Array.isArray(resourceRes?.data?.items) ? resourceRes.data.items : []
         resources = sortResources(mergeResources(brokerResources, fallbackAllResources))
-        renderResources(false)
+        renderResources(true)
       }).catch(error => {
         if (isPluginUnmountError(error)) return
         if (state.activePanel === panel && !resources.length) {

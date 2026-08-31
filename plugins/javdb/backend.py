@@ -283,6 +283,9 @@ def _merge_latest_detail(config: dict[str, Any], item: dict[str, Any], detail: d
     magnets = detail.get("magnets") if isinstance(detail.get("magnets"), list) else []
     if magnets and not int(merged.get("magnets_count") or 0):
         merged["magnets_count"] = len(magnets)
+    ed2ks = _video_ed2ks(detail)
+    if ed2ks and not int(merged.get("ed2ks_count") or 0):
+        merged["ed2ks_count"] = len(ed2ks)
     return merged
 
 
@@ -358,6 +361,18 @@ def _normalize_movie(config: dict[str, Any], item: dict[str, Any]) -> dict[str, 
     magnets_count = item.get("magnets_count")
     if magnets_count is None:
         magnets_count = item.get("magnet_count")
+    ed2ks = item.get("ed2ks")
+    if ed2ks is None:
+        ed2ks = item.get("ed2k_links") or item.get("ed2k_urls")
+    ed2ks_count = item.get("ed2ks_count")
+    if ed2ks_count is None:
+        ed2ks_count = item.get("ed2k_count")
+    if ed2ks_count is None and isinstance(ed2ks, list):
+        ed2ks_count = len(ed2ks)
+    try:
+        ed2ks_count = max(0, int(ed2ks_count or 0))
+    except (TypeError, ValueError):
+        ed2ks_count = 0
     return {
         "id": str(item.get("id") or item.get("video_id") or number or title),
         "number": number,
@@ -372,6 +387,7 @@ def _normalize_movie(config: dict[str, Any], item: dict[str, Any]) -> dict[str, 
         "score": item.get("score") or item.get("ranking") or 0,
         "ranking": item.get("ranking") or 0,
         "magnets_count": magnets_count or 0,
+        "ed2ks_count": ed2ks_count,
         "has_cnsub": bool(item.get("has_cnsub") or item.get("has_subtitle") or item.get("has_magnet_subtitle") or item.get("play_subtitle")),
         "play_subtitle": int(item.get("play_subtitle") or 0),
         "can_play": bool(item.get("can_play")),
