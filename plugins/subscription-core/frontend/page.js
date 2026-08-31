@@ -23,6 +23,7 @@ function fmtSpeed(bytes) {
 function downloaderLabel(value) {
   if (value === 'qbittorrent') return 'qBittorrent'
   if (value === 'xunlei-remote') return '迅雷远程'
+  if (value === '115') return '115 离线'
   return value || '下载器'
 }
 function esc(value) {
@@ -359,7 +360,7 @@ export async function mount(root, sdk = {}) {
     return `<div class="sub-candidates"><div class="sub-section-title">本次候选 <span>${candidates.length}</span></div>${candidates.map((candidate, index) => `
       <div class="sub-candidate${index === 0 ? ' is-best' : ''}">
         <span>${index + 1}</span><strong>${esc(candidate.title || candidate.id || '未知资源')}</strong>
-        <small>${esc(candidate.provider_label || candidate.provider || '')}${candidate.size_bytes ? ` · ${fmtSize(candidate.size_bytes)}` : ''} · ${Number(candidate.score || 0)} 分</small>
+        <small>${esc(candidate.provider_label || candidate.provider || '')}${candidate.kind === 'ed2k' ? ' · ED2K' : ''}${candidate.size_bytes ? ` · ${fmtSize(candidate.size_bytes)}` : ''} · ${Number(candidate.score || 0)} 分</small>
       </div>`).join('')}</div>`
   }
 
@@ -422,7 +423,7 @@ export async function mount(root, sdk = {}) {
         <div class="sub-card__main">
           <div class="sub-card__badges"></div>
           <div class="sub-card__meta">上次检测：${fmtDate(item.last_checked_at)}${sourceText(item) ? ` · 来源：${esc(sourceText(item))}` : ''}${item.current_file_path ? ` · 当前：${esc(item.current_file_path)}` : ''}</div>
-          ${best ? `<div class="sub-best"><strong>最佳候选</strong><span>${esc(best.provider_label || best.provider)} · ${esc(best.title || '')} · ${fmtSize(best.size_bytes)}</span><small>${esc(qualityText(item, best))}</small></div>` : '<div class="sub-best is-empty">暂无匹配资源</div>'}
+          ${best ? `<div class="sub-best"><strong>最佳候选</strong><span>${esc(best.provider_label || best.provider)}${best.kind === 'ed2k' ? ' · ED2K' : ''} · ${esc(best.title || '')} · ${fmtSize(best.size_bytes)}</span><small>${esc(qualityText(item, best))}</small></div>` : '<div class="sub-best is-empty">暂无匹配资源</div>'}
           ${renderDownload(item)}
           ${item.last_submit_error ? `<div class="sub-best is-error"><strong>${item.last_submit_error_kind === 'downloader_quota_limited' ? '等待重试' : item.last_submit_error_kind === 'upgrade_not_improved' ? '未达洗版条件' : '推送异常'}</strong><span>${esc(item.last_submit_error)}${item.retry_after_at ? ` · 下次尝试：${fmtDate(item.retry_after_at)}` : ''}</span></div>` : ''}
           ${state.expanded.has(item.id) ? `${renderCompare(item)}${renderCandidates(item)}<div class="sub-expanded-actions">${(item.cleanup_suggestion || {}).status === 'pending' ? '<button data-action="ack-cleanup" type="button">已处理旧版</button>' : ''}<button data-action="edit" type="button">编辑规则</button><button data-action="delete" type="button">取消订阅</button></div>` : ''}

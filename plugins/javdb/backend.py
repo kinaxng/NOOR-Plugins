@@ -4,7 +4,7 @@ import asyncio
 import re
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin
 
 import httpx
 
@@ -183,8 +183,12 @@ def _detail_has_cnsub(detail: dict[str, Any]) -> bool:
         return True
     if _contains_any_text(detail.get("categories"), subtitle_keywords):
         return True
-    magnets = detail.get("magnets") if isinstance(detail.get("magnets"), list) else []
-    return any(_contains_any_text(magnet.get("tags"), subtitle_keywords) or _contains_any_text(magnet.get("name"), subtitle_keywords) for magnet in magnets if isinstance(magnet, dict))
+    resources = [
+        entry
+        for key in ("magnets", "ed2ks")
+        for entry in (detail.get(key) if isinstance(detail.get(key), list) else [])
+    ]
+    return any(_contains_any_text(entry.get("tags"), subtitle_keywords) or _contains_any_text(entry.get("name"), subtitle_keywords) or _contains_any_text(entry.get("title"), subtitle_keywords) for entry in resources if isinstance(entry, dict))
 
 
 def _detail_is_cracked(detail: dict[str, Any]) -> bool:
@@ -195,8 +199,12 @@ def _detail_is_cracked(detail: dict[str, Any]) -> bool:
         return True
     if _contains_any_text(detail.get("categories"), cracked_keywords):
         return True
-    magnets = detail.get("magnets") if isinstance(detail.get("magnets"), list) else []
-    return any(_contains_any_text(magnet.get("tags"), cracked_keywords) or _contains_any_text(magnet.get("name"), cracked_keywords) for magnet in magnets if isinstance(magnet, dict))
+    resources = [
+        entry
+        for key in ("magnets", "ed2ks")
+        for entry in (detail.get(key) if isinstance(detail.get(key), list) else [])
+    ]
+    return any(_contains_any_text(entry.get("tags"), cracked_keywords) or _contains_any_text(entry.get("name"), cracked_keywords) or _contains_any_text(entry.get("title"), cracked_keywords) for entry in resources if isinstance(entry, dict))
 
 
 def _merge_latest_detail(config: dict[str, Any], item: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
@@ -563,11 +571,105 @@ def _normalize_magnet(magnet: dict[str, Any], code: str) -> dict[str, Any]:
     }
 
 
+def _size_bytes(value: Any) -> int:
+    """Normalize DBOnline's mixed numeric and human-readable size fields."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        number = float(value)
+        return max(0, int(number))
+    except (TypeError, ValueError):
+        pass
+    text = str(value or "").strip().replace(",", "")
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(tb|tib|gb|gib|mb|mib|kb|kib|b)?", text, re.I)
+    if not match:
+        return 0
+    number = float(match.group(1))
+    multiplier = {
+        "tb": 1024 ** 4, "tib": 1024 ** 4,
+        "gb": 1024 ** 3, "gib": 1024 ** 3,
+        "mb": 1024 ** 2, "mib": 1024 ** 2,
+        "kb": 1024, "kib": 1024,
+        "b": 1,
+        "": 1,
+    }.get((match.group(2) or "").lower(), 1)
+    return max(0, int(number * multiplier))
+
+
+def _ed2k_url(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("ed2k", "ed2k_url", "ed2k_link", "download_url", "downloadUrl", "url", "link"):
+            candidate = _ed2k_url(value.get(key))
+            if candidate:
+                return candidate
+        return ""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"ed2k://\S+", text, re.I)
+    return match.group(0).rstrip('\\\"\'<>),;') if match else ""
+
+
+def _normalize_ed2k(link: Any, code: str) -> dict[str, Any]:
+    """Normalize one DBOnline ED2K entry without losing the original link."""
+    raw = link if isinstance(link, dict) else {}
+    url = _ed2k_url(link)
+    parts = url.split("|")
+    url_name = unquote(parts[2]) if len(parts) > 2 and parts[2] else ""
+    url_size = _size_bytes(parts[3]) if len(parts) > 3 else 0
+    tags_raw = raw.get("tags") or raw.get("labels") or []
+    tags = [str(value).strip() for value in tags_raw] if isinstance(tags_raw, list) else [str(tags_raw).strip()] if tags_raw else []
+    size_bytes = _size_bytes(
+        raw.get("size_bytes") or raw.get("bytes") or raw.get("size") or raw.get("file_size") or raw.get("fileSize")
+    )
+    if not size_bytes and raw.get("size_mb"):
+        size_bytes = int(float(raw.get("size_mb") or 0) * 1024 * 1024)
+    size_bytes = size_bytes or url_size
+    name = str(raw.get("name") or raw.get("title") or raw.get("filename") or raw.get("file_name") or url_name or code).strip()
+    text = " ".join([name, *tags])
+    return {
+        "name": name or code,
+        "ed2k": url,
+        "size_bytes": size_bytes,
+        "size_mb": size_bytes / (1024 * 1024) if size_bytes else 0,
+        "date": raw.get("date") or raw.get("created_at") or "",
+        "tags": tags,
+        "site": raw.get("site") or raw.get("source") or "DBOnline",
+        "source_key": raw.get("source_key") or "dbonline",
+        "chinese": bool(raw.get("chinese") or re.search(r"中字|字幕|中文|中文字幕|\\b(?:chs|cht)\\b", text, re.I)),
+        "hd": bool(raw.get("hd") or re.search(r"高清|\\b(?:HD|4K|1080p|2160p)\\b", text, re.I)),
+        "raw": raw,
+    }
+
+
+def _video_ed2ks(video: dict[str, Any]) -> list[dict[str, Any]]:
+    values: list[Any] = []
+    for key in ("ed2ks", "ed2k_links", "ed2k_urls", "ed2k"):
+        value = video.get(key)
+        if isinstance(value, list):
+            values.extend(value)
+        elif value:
+            values.append(value)
+    code = str(video.get("code") or video.get("number") or "")
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_ed2k(value, code)
+        url = normalized.get("ed2k") or ""
+        if not url or url.lower() in seen:
+            continue
+        seen.add(url.lower())
+        out.append(normalized)
+    return out
+
+
 def _resource_requirements_from_url(url: str, *, private_tracker: bool = False) -> dict[str, Any]:
     raw = str(url or "").strip()
     requirements: dict[str, Any] = {}
     if raw.startswith("magnet:?"):
         requirements["accepts_public_magnet"] = True
+    elif raw.lower().startswith("ed2k://"):
+        requirements["accepts_ed2k"] = True
     elif raw.startswith("http://") or raw.startswith("https://"):
         requirements["accepts_http_torrent"] = True
     if private_tracker:
@@ -616,6 +718,76 @@ def _resource_from_javdb_magnet(video: dict[str, Any], magnet: dict[str, Any], i
     }
 
 
+def _resource_from_javdb_ed2k(video: dict[str, Any], ed2k: dict[str, Any], index: int) -> dict[str, Any]:
+    code = str(video.get("code") or video.get("number") or "")
+    title = str(video.get("display_title") or video.get("title") or code or ed2k.get("name") or f"{code} #{index + 1}").strip()
+    url = str(ed2k.get("ed2k") or "").strip()
+    subtitle_parts = [
+        f"{ed2k.get('size_mb'):.1f} MB" if ed2k.get("size_mb") else "",
+        str(ed2k.get("date") or ""),
+        str(ed2k.get("site") or "DBOnline"),
+    ]
+    tags = [str(tag) for tag in (ed2k.get("tags") or []) if str(tag or "").strip()]
+    requirements = _resource_requirements_from_url(url)
+    return {
+        "id": f"javdb:{code or video.get('id') or 'video'}:ed2k:{index}",
+        "kind": "ed2k",
+        "query_key": code,
+        "title": str(ed2k.get("name") or title),
+        "subtitle": " · ".join(part for part in subtitle_parts if part),
+        "url": url,
+        "ed2k": url,
+        "size_bytes": int(ed2k.get("size_bytes") or 0),
+        "file_count": 1,
+        "tags": tags,
+        "cover_url": str(video.get("cover_url") or video.get("thumb_url") or ""),
+        "fanart_url": str(video.get("cover_url") or video.get("thumb_url") or ""),
+        "source_url": str(video.get("link") or ""),
+        "features": {
+            "has_subtitle": bool(ed2k.get("chinese")),
+            "is_cracked": any("破解" in tag for tag in tags),
+            "is_private_tracker": False,
+        },
+        "requirements": requirements,
+        "download_preference": ["115"],
+        "compatible_downloaders": ["115"],
+        "preferred_downloader": "115",
+        "metadata": {
+            "source_plugin": PLUGIN_ID,
+            "video_code": code,
+            "video_title": title,
+            "site": str(ed2k.get("site") or "DBOnline"),
+            "source_key": str(ed2k.get("source_key") or "dbonline"),
+            "link_type": "ed2k",
+        },
+    }
+
+
+def _resource_items_for_video(video: dict[str, Any]) -> list[dict[str, Any]]:
+    code = str(video.get("code") or video.get("number") or "")
+    resources = [
+        _resource_from_javdb_magnet(video, magnet, index)
+        for index, magnet in enumerate(
+            _normalize_magnet(x, code) for x in (video.get("magnets") or []) if isinstance(x, dict)
+        )
+    ]
+    resources.extend(
+        _resource_from_javdb_ed2k(video, ed2k, index)
+        for index, ed2k in enumerate(_video_ed2ks(video))
+    )
+    return resources
+
+
+def _limit_resource_items(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if len(items) <= limit:
+        return items
+    selected = list(items[:limit])
+    ed2k = next((item for item in items if item.get("kind") == "ed2k"), None)
+    if ed2k and not any(item.get("kind") == "ed2k" for item in selected):
+        selected[-1] = ed2k
+    return selected
+
+
 async def _resource_search(config: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
     raw_code = payload.get("code") or payload.get("number") or ""
     raw_keyword = payload.get("keyword") or payload.get("q") or ""
@@ -655,17 +827,13 @@ async def _resource_search(config: dict[str, Any], payload: dict[str, Any]) -> l
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for video in candidates:
-        magnets = [_normalize_magnet(x, str(video.get("code") or video.get("number") or "")) for x in (video.get("magnets") or []) if isinstance(x, dict)]
-        for idx, magnet in enumerate(magnets):
-            item = _resource_from_javdb_magnet(video, magnet, idx)
+        for item in _resource_items_for_video(video):
             key = str(item.get("url") or item.get("id") or "")
             if not key or key in seen:
                 continue
             seen.add(key)
             out.append(item)
-            if len(out) >= limit:
-                return out
-    return out
+    return _limit_resource_items(out, limit)
 
 
 async def search_resources(query: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -720,10 +888,7 @@ async def _resource_search_paged(config: dict[str, Any], payload: dict[str, Any]
 
         loaded_videos = await asyncio.gather(*(load_movie_detail(movie) for movie in movies))
         for video in [x for x in loaded_videos if isinstance(x, dict)]:
-            item_code = _code(video.get("code") or video.get("number") or "")
-            magnets = [_normalize_magnet(x, str(video.get("code") or video.get("number") or item_code)) for x in (video.get("magnets") or []) if isinstance(x, dict)]
-            for idx, magnet in enumerate(magnets):
-                item = _resource_from_javdb_magnet(video, magnet, idx)
+            for item in _resource_items_for_video(video):
                 key = str(item.get("url") or item.get("id") or "")
                 if not key or key in seen:
                     continue
@@ -1087,10 +1252,11 @@ async def _list_action(config: dict[str, Any], action: str, payload: dict[str, A
 
 def _torrent_contribution(config: dict[str, Any], video: dict[str, Any], magnet: dict[str, Any], idx: int) -> dict[str, Any] | None:
     code = _code(video.get("code") or video.get("number"))
-    url = str(magnet.get("magnet") or "")
+    url = str(magnet.get("magnet") or magnet.get("ed2k") or "")
     if not code or not url:
         return None
-    key = f"javdb:{code}:{idx}:{abs(hash(url))}"
+    link_type = "ed2k" if url.lower().startswith("ed2k://") else "magnet"
+    key = f"javdb:{code}:{link_type}:{idx}:{abs(hash(url))}"
     torrent_ref = f"torrent:{idx}"
     labels = list(magnet.get("tags") or [])
     if magnet.get("chinese") and "中文字幕" not in labels:
@@ -1108,6 +1274,7 @@ def _torrent_contribution(config: dict[str, Any], video: dict[str, Any], magnet:
             "link": f"javdb://video/{code}",
             "download_url": url,
             "download_available": True,
+            "link_type": link_type,
             "image_url": video.get("cover_url") or video.get("thumb_url") or "",
             "size_bytes": magnet.get("size_bytes") or 0,
             "seeders": 0,
@@ -1197,8 +1364,9 @@ async def build_knowledge_contributions(config: dict[str, Any], limit: int = 100
             video = await _video(config, code)
         except Exception:
             continue
-        magnets = [_normalize_magnet(x, code) for x in (video.get("magnets") or []) if isinstance(x, dict)]
-        for idx, magnet in enumerate(magnets[:per_code]):
+        links = [_normalize_magnet(x, code) for x in (video.get("magnets") or []) if isinstance(x, dict)]
+        links.extend(_video_ed2ks(video))
+        for idx, magnet in enumerate(links[:per_code]):
             item = _torrent_contribution(config, video, magnet, idx)
             if item:
                 items.append(item)

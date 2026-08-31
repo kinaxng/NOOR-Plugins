@@ -655,6 +655,14 @@ def _resource_matches_code(resource: dict[str, Any], code: str) -> bool:
     return False
 
 
+def _resource_kind(resource: dict[str, Any]) -> str:
+    kind = str(resource.get("kind") or "").strip().lower()
+    if kind:
+        return kind
+    url = str(resource.get("url") or resource.get("download_url") or resource.get("magnet") or "").strip().lower()
+    return "ed2k" if url.startswith("ed2k://") else "torrent"
+
+
 def _matches(sub: dict[str, Any], resource: dict[str, Any]) -> tuple[bool, str]:
     mode = str(sub.get("mode") or "loose")
     require_cracked = bool(sub.get("require_cracked"))
@@ -668,7 +676,7 @@ def _matches(sub: dict[str, Any], resource: dict[str, Any]) -> tuple[bool, str]:
     return True, "匹配"
 
 
-def _preference_rank(sub: dict[str, Any], resource: dict[str, Any]) -> tuple[int, int, int]:
+def _preference_rank(sub: dict[str, Any], resource: dict[str, Any]) -> tuple[int, int, int, int]:
     f = _features(resource)
     if f.get("is_new_model_uncensored_crack") and f["has_subtitle"]:
         tier = -1
@@ -680,7 +688,10 @@ def _preference_rank(sub: dict[str, Any], resource: dict[str, Any]) -> tuple[int
         tier = 2
     else:
         tier = 3
-    return (tier, -_score_resource(resource), -int(resource.get("size_bytes") or 0))
+    # Prefer the normal torrent path when both candidates satisfy the same
+    # subscription profile; ED2K is the explicit 115 fallback.
+    kind_rank = 1 if _resource_kind(resource) == "ed2k" else 0
+    return (tier, kind_rank, -_score_resource(resource), -int(resource.get("size_bytes") or 0))
 
 
 async def _find_media(code: str, *aliases: Any) -> dict[str, Any] | None:

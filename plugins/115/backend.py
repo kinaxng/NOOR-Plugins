@@ -255,6 +255,24 @@ async def on_config_updated(config: dict[str, Any]) -> None:
 
 async def handle_action(action: str, config: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
+    # 115 receives one magnet/ED2K/HTTP source per offline task. Its
+    # destination is a cloud folder ID, not a local downloader path, so the
+    # shared push dialog only needs to show the downloader name.
+    if action == "download_options":
+        return {
+            "ok": True,
+            "downloader": "115 离线",
+            "default_savepath": "",
+            "default_category": "",
+            "categories": [],
+            "paths": [],
+            "supports_categories": False,
+            "supports_savepath": False,
+            "supports_rename": False,
+            "supports_resource_preview": False,
+            "supports_file_indices": False,
+            "supports_small_file_filter": False,
+        }
     if action in {"status", "account"}:
         return await account_status(config)
     if action == "auth_start":

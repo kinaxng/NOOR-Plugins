@@ -142,6 +142,7 @@ function compactResourceSubtitle(resource) {
 
 function resourceBadgeModels(resource) {
   const badges = []
+  if (String(resource?.kind || '').toLowerCase() === 'ed2k') badges.push({ label: 'ED2K', tone: 'info' })
   if (resource?.features?.has_subtitle) badges.push({ label: '中字', tone: 'success' })
   if (resource?.features?.is_cracked) badges.push({ label: '破解', tone: 'danger' })
   if (resource?.features?.is_private_tracker) badges.push({ label: 'PT', tone: 'warning' })
@@ -1615,6 +1616,7 @@ export async function mount(root, sdk) {
       if (detectCnsub(video)) heroBadges.appendChild(sdk.ui.badge({ label: '中字', tone: 'success' }))
       if (detectCracked(video)) heroBadges.appendChild(sdk.ui.badge({ label: '破解', tone: 'danger' }))
       if (Number(video?.magnets?.length || 0) > 0) heroBadges.appendChild(sdk.ui.badge({ label: `${video.magnets.length} 磁链`, tone: 'info' }))
+      if (Number(video?.ed2ks?.length || 0) > 0) heroBadges.appendChild(sdk.ui.badge({ label: `${video.ed2ks.length} ED2K`, tone: 'info' }))
       heroMeta.appendChild(heroBadges)
       heroHead.appendChild(heroMeta)
       hero.appendChild(heroHead)
@@ -1691,6 +1693,36 @@ export async function mount(root, sdk) {
         compatible_downloaders: [],
         preferred_downloader: null,
       }))
+      const fallbackEd2kResources = (Array.isArray(video.ed2ks) ? video.ed2ks : []).map((entry, index) => {
+        const raw = typeof entry === 'string' ? { ed2k: entry } : (entry || {})
+        const url = String(raw.ed2k || raw.ed2k_url || raw.ed2k_link || raw.download_url || raw.downloadUrl || raw.url || raw.link || '').trim()
+        const parts = url.split('|')
+        let filename = ''
+        if (parts.length > 2 && parts[2]) {
+          try { filename = decodeURIComponent(parts[2]) } catch { filename = parts[2] }
+        }
+        const sizeBytes = Number(raw.size_bytes || raw.bytes || raw.file_size || (parts.length > 3 ? parts[3] : 0)) || 0
+        return {
+          id: `javdb:fallback:ed2k:${index}`,
+          provider: 'javdb',
+          provider_label: 'JavDB',
+          kind: 'ed2k',
+          title: String(raw.name || raw.title || raw.filename || raw.file_name || filename || detailTitle(video)).trim(),
+          subtitle: [sizeBytes ? `${(sizeBytes / 1024 / 1024).toFixed(1)} MB` : '', raw.date || '', raw.site || 'DBOnline'].filter(Boolean).join(' · '),
+          url,
+          ed2k: url,
+          tags: Array.isArray(raw.tags) ? raw.tags : [],
+          features: {
+            has_subtitle: textHasKeywords(raw.tags || raw.name || '', ['中字', '字幕', '中文', '中文字幕', 'chs', 'cht']),
+            is_cracked: textHasKeywords(raw.tags || raw.name || '', ['破解', '破解版', '无码破解', 'uncensored leak']),
+            is_private_tracker: false,
+          },
+          requirements: url.toLowerCase().startsWith('ed2k://') ? { accepts_ed2k: true } : {},
+          compatible_downloaders: ['115'],
+          preferred_downloader: '115',
+        }
+      }).filter(resource => resource.url)
+      const fallbackAllResources = [...fallbackResources, ...fallbackEd2kResources]
       const sortResources = list => list.slice().sort((a, b) => {
           const providerDiff = resourceProviderOrder(a) - resourceProviderOrder(b)
           if (providerDiff) return providerDiff
@@ -1698,7 +1730,7 @@ export async function mount(root, sdk) {
           const subB = String(b?.subtitle || '')
           return subA.localeCompare(subB)
         })
-      let resources = sortResources(fallbackResources)
+      let resources = sortResources(fallbackAllResources)
 
       const openResourceDownload = async resource => {
         const resolved = (await sdk.api.post('/plugins/resources/resolve-download', {
@@ -1715,6 +1747,7 @@ export async function mount(root, sdk) {
           downloaderId,
           downloaderIds,
           url: resolvedUrl,
+          submitIdleLabel: resource.kind === 'ed2k' ? '115 离线' : '推送下载',
           title: titleOf(video),
           rename: titleCandidates(video)[0]?.value || titleOf(video),
           titleOptions: titleCandidates(video),
@@ -1775,7 +1808,7 @@ export async function mount(root, sdk) {
         magnetList.innerHTML = ''
         const visibleResources = resources.filter(resource => String(resource.provider || resource.provider_label || 'other') === selectedProvider)
         if (!visibleResources.length) {
-          magnetList.appendChild(el('div', 'javdb-no-data', '暂无磁链资源'))
+          magnetList.appendChild(el('div', 'javdb-no-data', '暂无下载资源'))
           return
         }
         visibleResources.forEach(resource => {
@@ -1795,7 +1828,7 @@ export async function mount(root, sdk) {
           if (tagRow.childNodes.length) info.appendChild(tagRow)
 
           const pushBtn = sdk.ui.submitButton({
-            idleLabel: '推送下载',
+            idleLabel: resource.kind === 'ed2k' ? '115 离线' : '推送下载',
             successLabel: '已加入',
             onClick: () => openResourceDownload(resource),
           })
@@ -1833,13 +1866,13 @@ export async function mount(root, sdk) {
       }).then(resourceRes => {
         if (state.activePanel !== panel) return
         const brokerResources = Array.isArray(resourceRes?.data?.items) ? resourceRes.data.items : []
-        resources = sortResources(mergeResources(brokerResources, fallbackResources))
+        resources = sortResources(mergeResources(brokerResources, fallbackAllResources))
         renderResources(false)
       }).catch(error => {
         if (isPluginUnmountError(error)) return
         if (state.activePanel === panel && !resources.length) {
           magnetList.innerHTML = ''
-          magnetList.appendChild(el('div', 'javdb-no-data', '资源搜索失败，暂无磁链资源'))
+          magnetList.appendChild(el('div', 'javdb-no-data', '资源搜索失败，暂无下载资源'))
         }
       })
     } catch (e) {
