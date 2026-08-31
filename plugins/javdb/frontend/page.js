@@ -1888,16 +1888,26 @@ export async function mount(root, sdk) {
       const magnetList = el('div', 'javdb-magnets')
       const providerBar = el('div', 'javdb-resource-providers')
       const allProviderKey = '__all__'
+      const ed2kProviderKey = '__ed2k__'
       let providerGroups = []
       let selectedProvider = ''
+
+      const resourceGroupKey = resource => String(resource?.kind || '').toLowerCase() === 'ed2k'
+        ? ed2kProviderKey
+        : String(resource?.provider || resource?.provider_label || 'other')
+
+      const resourceGroupOrder = group => {
+        if (group.key === ed2kProviderKey) return 3
+        return resourceProviderOrder({ provider: group.key })
+      }
 
       function rebuildProviderGroups(keepSelection = true) {
         const providerMap = new Map()
         resources.forEach(resource => {
-          const key = String(resource.provider || resource.provider_label || 'other')
+          const key = resourceGroupKey(resource)
           const existing = providerMap.get(key) || {
             key,
-            label: String(resource.provider_label || resource.provider || '未知来源'),
+            label: key === ed2kProviderKey ? 'ED2K' : String(resource.provider_label || resource.provider || '未知来源'),
             count: 0,
             isPrivateTracker: false,
           }
@@ -1905,7 +1915,7 @@ export async function mount(root, sdk) {
           existing.isPrivateTracker = existing.isPrivateTracker || !!resource?.features?.is_private_tracker
           providerMap.set(key, existing)
         })
-        const providers = Array.from(providerMap.values()).sort((a, b) => resourceProviderOrder(a) - resourceProviderOrder(b))
+        const providers = Array.from(providerMap.values()).sort((a, b) => resourceGroupOrder(a) - resourceGroupOrder(b))
         providerGroups = resources.length
           ? [{ key: allProviderKey, label: '全部', count: resources.length, isPrivateTracker: false }, ...providers]
           : providers
@@ -1938,7 +1948,7 @@ export async function mount(root, sdk) {
         magnetList.innerHTML = ''
         const visibleResources = selectedProvider === allProviderKey
           ? resources
-          : resources.filter(resource => String(resource.provider || resource.provider_label || 'other') === selectedProvider)
+          : resources.filter(resource => resourceGroupKey(resource) === selectedProvider)
         if (!visibleResources.length) {
           magnetList.appendChild(el('div', 'javdb-no-data', '暂无下载资源'))
           return
