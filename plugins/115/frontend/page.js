@@ -39,7 +39,7 @@ export async function mount(root, sdk) {
   const mediaPanel = document.createElement('section')
   mediaPanel.dataset.panel = 'media'
   mediaPanel.hidden = true
-  mediaPanel.innerHTML = '<div class="noor-plugin-115-empty"><strong>媒体流水线尚未产生记录</strong><span>只处理新完成任务中的媒体，不扫描整个网盘。</span></div>'
+  mediaPanel.innerHTML = '<div class="noor-plugin-115-empty"><strong>媒体记录尚未产生</strong><span>只处理新完成任务中的媒体；STRM 生成后由 MDC-NG incoming 监控目录负责整理。</span></div>'
   page.append(topbar, accountPanel, taskPanel, mediaPanel)
   root.append(page)
 
@@ -142,7 +142,7 @@ export async function mount(root, sdk) {
       const response = await sdk.api.post('/plugins/115/actions/media', { payload: { limit: 200 } })
       const items = (response?.data || response)?.items || []
       if (!items.length) {
-        mediaPanel.innerHTML = '<div class="noor-plugin-115-empty"><strong>媒体流水线尚未产生记录</strong><span>只处理新完成任务中的媒体，不扫描整个网盘。</span></div>'
+        mediaPanel.innerHTML = '<div class="noor-plugin-115-empty"><strong>媒体记录尚未产生</strong><span>只处理新完成任务中的媒体；STRM 生成后由 MDC-NG incoming 监控目录负责整理。</span></div>'
         return
       }
       mediaPanel.innerHTML = `<div class="noor-plugin-115-task-list">${items.map(item => `<article><div><strong>${item.name || item.file_id}</strong><span>${item.file_id} · ${fmtBytes(item.size)}</span></div><em class="is-${item.strm_status}">STRM ${item.strm_status}</em><b>${item.mediainfo_status}</b><small>${item.path || ''}</small></article>`).join('')}</div>`
