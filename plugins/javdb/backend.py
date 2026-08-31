@@ -170,19 +170,51 @@ def _movie_list(data: Any) -> list[dict[str, Any]]:
     return []
 
 
+CRACKED_MARKERS = (
+    "破解",
+    "无码",
+    "无码破解",
+    "无码流出",
+    "無碼",
+    "無修正",
+    "无修正",
+    "流出",
+    "uncensored",
+    "uncensor",
+    "leak",
+    "leaked",
+    "crack",
+)
+CRACKED_TOKEN_RE = re.compile(r"(?<![a-z0-9])u(?:[.\-_ ]?c)?(?![a-z0-9])", re.IGNORECASE)
+
+
+def _contains_cracked_marker(value: Any) -> bool:
+    """Detect common uncensored/cracked release markers in nested API data."""
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return any(_contains_cracked_marker(entry) for entry in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_contains_cracked_marker(entry) for entry in value)
+    text = str(value).casefold()
+    return any(marker.casefold() in text for marker in CRACKED_MARKERS) or bool(CRACKED_TOKEN_RE.search(text))
+
+
 def _is_cracked_movie(item: dict[str, Any]) -> bool:
-    if bool(item.get("is_cracked") or item.get("cracked")):
+    if bool(
+        item.get("is_cracked")
+        or item.get("cracked")
+        or item.get("is_uncensored")
+        or item.get("uncensored")
+        or item.get("has_uncensored")
+        or item.get("is_leaked")
+        or item.get("leaked")
+    ):
         return True
-    text_parts = []
-    tags = item.get("tags")
-    if isinstance(tags, list):
-        for tag in tags:
-            if isinstance(tag, dict):
-                text_parts.append(tag.get("name"))
-            else:
-                text_parts.append(tag)
-    text = " ".join(str(x or "") for x in text_parts).lower()
-    return any(keyword in text for keyword in ("破解", "破解版", "无码破解", "uncensored leak"))
+    return any(
+        _contains_cracked_marker(item.get(key))
+        for key in ("tags", "categories", "magnets", "ed2ks")
+    )
 
 
 def _contains_any_text(value: Any, keywords: tuple[str, ...]) -> bool:
@@ -215,19 +247,20 @@ def _detail_has_cnsub(detail: dict[str, Any]) -> bool:
 
 
 def _detail_is_cracked(detail: dict[str, Any]) -> bool:
-    cracked_keywords = ("破解", "破解版", "无码破解", "uncensored leak")
-    if bool(detail.get("is_cracked") or detail.get("cracked")):
+    if bool(
+        detail.get("is_cracked")
+        or detail.get("cracked")
+        or detail.get("is_uncensored")
+        or detail.get("uncensored")
+        or detail.get("has_uncensored")
+        or detail.get("is_leaked")
+        or detail.get("leaked")
+    ):
         return True
-    if _contains_any_text(detail.get("tags"), cracked_keywords):
-        return True
-    if _contains_any_text(detail.get("categories"), cracked_keywords):
-        return True
-    resources = [
-        entry
-        for key in ("magnets", "ed2ks")
-        for entry in (detail.get(key) if isinstance(detail.get(key), list) else [])
-    ]
-    return any(_contains_any_text(entry.get("tags"), cracked_keywords) or _contains_any_text(entry.get("name"), cracked_keywords) or _contains_any_text(entry.get("title"), cracked_keywords) for entry in resources if isinstance(entry, dict))
+    return any(
+        _contains_cracked_marker(detail.get(key))
+        for key in ("tags", "categories", "magnets", "ed2ks")
+    )
 
 
 def _merge_latest_detail(config: dict[str, Any], item: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
@@ -725,7 +758,7 @@ def _resource_from_javdb_magnet(video: dict[str, Any], magnet: dict[str, Any], i
         "source_url": str(video.get("link") or ""),
         "features": {
             "has_subtitle": bool(magnet.get("chinese")),
-            "is_cracked": any("破解" in tag for tag in tags),
+            "is_cracked": _contains_cracked_marker({"tags": tags, "name": magnet.get("name"), "title": magnet.get("title")}),
             "is_private_tracker": False,
         },
         "requirements": requirements,
@@ -768,7 +801,7 @@ def _resource_from_javdb_ed2k(video: dict[str, Any], ed2k: dict[str, Any], index
         "source_url": str(video.get("link") or ""),
         "features": {
             "has_subtitle": bool(ed2k.get("chinese")),
-            "is_cracked": any("破解" in tag for tag in tags),
+            "is_cracked": _contains_cracked_marker({"tags": tags, "name": ed2k.get("name"), "title": ed2k.get("title")}),
             "is_private_tracker": False,
         },
         "requirements": requirements,

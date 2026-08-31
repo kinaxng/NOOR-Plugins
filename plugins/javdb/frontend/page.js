@@ -69,6 +69,20 @@ function textHasKeywords(value, keywords) {
   return textHasKeywords(String(value), keywords)
 }
 
+const crackedMarkerKeywords = [
+  '破解', '无码', '无码破解', '无码流出', '無碼', '無修正', '无修正', '流出',
+  'uncensored', 'uncensor', 'leak', 'leaked', 'crack',
+]
+const crackedTokenPattern = /(?<![a-z0-9])u(?:[.\-_ ]?c)?(?![a-z0-9])/i
+
+function textHasCrackedMarker(value) {
+  if (value == null) return false
+  if (Array.isArray(value)) return value.some(entry => textHasCrackedMarker(entry))
+  if (typeof value === 'object') return Object.values(value).some(entry => textHasCrackedMarker(entry))
+  const text = String(value).toLowerCase()
+  return crackedMarkerKeywords.some(keyword => text.includes(keyword.toLowerCase())) || crackedTokenPattern.test(text)
+}
+
 function detectCnsub(detail) {
   const keywords = ['中字', '字幕', '中文', '中文字幕', 'chs', 'cht']
   return textHasKeywords(detail?.categories, keywords)
@@ -77,11 +91,9 @@ function detectCnsub(detail) {
 }
 
 function detectCracked(detail) {
-  const keywords = ['破解', '破解版', '无码破解', 'uncensored leak']
-  if (detail?.is_cracked || detail?.cracked) return true
-  return textHasKeywords(detail?.categories, keywords)
-    || textHasKeywords(detail?.magnets, keywords)
-    || textHasKeywords(detail?.tags, keywords)
+  if (detail?.is_cracked || detail?.cracked || detail?.is_uncensored || detail?.uncensored || detail?.has_uncensored || detail?.is_leaked || detail?.leaked) return true
+  return ['categories', 'magnets', 'ed2ks', 'tags']
+    .some(key => textHasCrackedMarker(detail?.[key]))
 }
 
 function formatReleaseDate(value) {
@@ -113,7 +125,7 @@ function normalizeCode(value) {
 function magnetTone(tag) {
   const text = String(tag || '')
   if (/中字|字幕|中文/i.test(text)) return 'success'
-  if (/破解|流出/i.test(text)) return 'danger'
+  if (textHasCrackedMarker(text)) return 'danger'
   if (/高清|HD|4K/i.test(text)) return 'info'
   return 'neutral'
 }
@@ -1785,7 +1797,7 @@ export async function mount(root, sdk) {
         tags: Array.isArray(magnet.tags) ? magnet.tags : [],
         features: {
           has_subtitle: textHasKeywords(magnet.tags || magnet.name || '', ['中字', '字幕', '中文', '中文字幕', 'chs', 'cht']),
-          is_cracked: textHasKeywords(magnet.tags || magnet.name || '', ['破解', '破解版', '无码破解', 'uncensored leak']),
+          is_cracked: textHasCrackedMarker(magnet),
           is_private_tracker: false,
         },
         requirements: String(magnet.magnet || '').startsWith('magnet:?') ? { accepts_public_magnet: true } : {},
@@ -1813,7 +1825,7 @@ export async function mount(root, sdk) {
           tags: Array.isArray(raw.tags) ? raw.tags : [],
           features: {
             has_subtitle: textHasKeywords(raw.tags || raw.name || '', ['中字', '字幕', '中文', '中文字幕', 'chs', 'cht']),
-            is_cracked: textHasKeywords(raw.tags || raw.name || '', ['破解', '破解版', '无码破解', 'uncensored leak']),
+            is_cracked: textHasCrackedMarker(raw),
             is_private_tracker: false,
           },
           requirements: url.toLowerCase().startsWith('ed2k://') ? { accepts_ed2k: true } : {},
