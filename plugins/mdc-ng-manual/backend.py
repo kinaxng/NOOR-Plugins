@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -121,6 +122,26 @@ def _find_json_objects(text: str, marker: str) -> list[dict[str, Any]]:
             out.append(obj)
         pos = start + end
     return out
+
+
+def _next_f_payloads(html: str) -> list[str]:
+    """Decode Next.js RSC payload strings before looking for embedded records.
+
+    MDC-NG renders the manual-job rows in ``self.__next_f.push([1, "..."])``.
+    The row JSON is therefore escaped once as a JavaScript string; searching
+    the raw HTML for ``"job":`` silently returns no rows.
+    """
+    payloads: list[str] = []
+    decoder = json.JSONDecoder()
+    prefix = "self.__next_f.push([1,"
+    for match in re.finditer(re.escape(prefix), html):
+        try:
+            value, _ = decoder.raw_decode(html[match.end():])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(value, str):
+            payloads.append(value)
+    return payloads
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -341,7 +362,9 @@ async def _fetch_jobs(config: dict[str, Any]) -> list[dict[str, Any]]:
     resp = await client.get("/manual-jobs")
     resp.raise_for_status()
     html = resp.text
-    jobs = _find_json_objects(html, '"job":')
+    jobs: list[dict[str, Any]] = []
+    for payload in [html, *_next_f_payloads(html)]:
+        jobs.extend(_find_json_objects(payload, '"job":'))
     dedup: dict[int, dict[str, Any]] = {}
     for job in jobs:
         try:

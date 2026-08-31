@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, Integer, JSON, String, Text, create_engine, inspect, select, text
@@ -105,6 +105,9 @@ class PipelineEvent(Base):
     dedupe_key: Mapped[str] = mapped_column(String(256), unique=True, index=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -124,6 +127,13 @@ def init_storage() -> None:
             connection.execute(text("ALTER TABLE cloud115_offline_tasks ADD COLUMN result_file_id VARCHAR(64) DEFAULT ''"))
         if "pipeline_status" not in columns:
             connection.execute(text("ALTER TABLE cloud115_offline_tasks ADD COLUMN pipeline_status VARCHAR(32) DEFAULT 'pending'"))
+        event_columns = {column["name"] for column in inspect(connection).get_columns("cloud115_pipeline_events")}
+        if "attempts" not in event_columns:
+            connection.execute(text("ALTER TABLE cloud115_pipeline_events ADD COLUMN attempts INTEGER DEFAULT 0"))
+        if "last_error" not in event_columns:
+            connection.execute(text("ALTER TABLE cloud115_pipeline_events ADD COLUMN last_error TEXT DEFAULT ''"))
+        if "next_attempt_at" not in event_columns:
+            connection.execute(text("ALTER TABLE cloud115_pipeline_events ADD COLUMN next_attempt_at DATETIME"))
 
 
 def source_identity(url: str) -> tuple[str, str, str]:
@@ -387,7 +397,9 @@ def list_events(*, pending_only: bool = True, limit: int = 100) -> list[dict[str
             statement = statement.where(PipelineEvent.status == "pending")
         rows = list(session.scalars(statement.order_by(PipelineEvent.created_at.asc()).limit(max(1, min(limit, 500)))).all())
         return [{"id": row.id, "type": row.event_type, "file_id": row.file_id, "payload": dict(row.payload or {}),
-            "status": row.status, "created_at": row.created_at.isoformat() if row.created_at else ""} for row in rows]
+            "status": row.status, "attempts": row.attempts, "last_error": row.last_error,
+            "next_attempt_at": row.next_attempt_at.isoformat() if row.next_attempt_at else "",
+            "created_at": row.created_at.isoformat() if row.created_at else ""} for row in rows]
 
 
 def acknowledge_event(event_id: str) -> bool:
@@ -398,4 +410,16 @@ def acknowledge_event(event_id: str) -> bool:
             return False
         event.status = "acknowledged"
         event.acknowledged_at = utcnow()
+        return True
+
+
+def record_event_attempt(event_id: str, error: str, *, delay_seconds: int) -> bool:
+    init_storage()
+    with Session.begin() as session:
+        event = session.get(PipelineEvent, str(event_id))
+        if not event:
+            return False
+        event.attempts = int(event.attempts or 0) + 1
+        event.last_error = str(error or "pipeline delivery failed")[:1000]
+        event.next_attempt_at = utcnow() + timedelta(seconds=max(30, min(delay_seconds, 3600)))
         return True
