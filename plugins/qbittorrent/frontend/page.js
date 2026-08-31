@@ -597,7 +597,7 @@ export async function mount(el, sdk = {}) {
     try {
       state.downloadOptions = await call('download_options')
     } catch {}
-    const defaultPath = state.downloadOptions?.default_savepath || '/data/download/av'
+    const defaultPath = state.downloadOptions?.default_savepath || ''
     const defaultCategory = state.downloadOptions?.default_category || ''
     const urlInput = sdk.ui?.textarea
       ? sdk.ui.textarea({ placeholder: '每行一个 magnet / BT URL / 普通 URL，最多 50 条', rows: 6, className: 'qb-textarea' })
@@ -610,6 +610,7 @@ export async function mount(el, sdk = {}) {
         })()
     const pathInput = document.createElement('input')
     pathInput.className = 'noor-plugin-input qb-input'
+    pathInput.placeholder = '/data/download/av（按部署环境填写）'
     pathInput.value = defaultPath
     const renameInput = document.createElement('input')
     renameInput.className = 'noor-plugin-input qb-input'

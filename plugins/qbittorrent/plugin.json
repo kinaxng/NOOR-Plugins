@@ -13,7 +13,7 @@
     "password": "",
     "api_key": "",
     "category": "",
-    "savepath": "/data/download/av",
+    "savepath": "",
     "noor_tag": "noor",
     "show_noor_only": false,
     "min_file_size_mb": 0
@@ -24,7 +24,7 @@
     "password": {"type": "password", "label": "密码"},
     "api_key": {"type": "password", "label": "API Key", "description": "qBittorrent 5.2+ 可使用，填写后优先采用 Bearer 认证"},
     "category": {"type": "string", "label": "默认分类"},
-    "savepath": {"type": "string", "label": "默认保存路径", "description": "统一 AV 下载入口，例如 /data/download/av"},
+    "savepath": {"type": "string", "label": "默认保存路径", "description": "由部署环境填写；Docker 场景可使用 /data/download/av"},
     "noor_tag": {"type": "string", "label": "NOOR 标签"},
     "show_noor_only": {"type": "boolean", "label": "仅显示 NOOR 任务"},
     "min_file_size_mb": {"type": "number", "label": "最小保留文件大小 MB", "min": 0, "max": 4096}

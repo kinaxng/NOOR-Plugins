@@ -32,7 +32,7 @@
     "access_token": "",
     "refresh_token": "",
     "offline_directory_id": "0",
-    "strm_directory": "/data/strm/av/incoming",
+    "strm_directory": "",
     "public_base_url": "",
     "stream_url_cache_seconds": 180,
     "discovery_max_depth": 4,
