@@ -19,7 +19,7 @@
     <label>基础</label>
     <a href="#tokens">Design Tokens</a><a href="#typography">字体与层级</a>
     <label>组件</label>
-    <a href="#button">Button</a><a href="#tag">Tag / Badge</a><a href="#tooltip">Tooltip</a><a href="#dropdown">Dropdown</a><a href="#progress">Progress</a><a href="#input">Input</a><a href="#switch">Settings Switch</a><a href="#setting-row">Setting Row</a><a href="#path">Path Input</a><a href="#modal">Modal</a><a href="#scroll">Scrollbar</a>
+    <a href="#button">Button</a><a href="#tag">Tag / Badge</a><a href="#tooltip">Tooltip</a><a href="#dropdown">Dropdown</a><a href="#progress">Progress</a><a href="#choice">Checkbox / Radio</a><a href="#alert">Alert</a><a href="#empty">Empty / Loading</a><a href="#input">Input</a><a href="#switch">Settings Switch</a><a href="#setting-row">Setting Row</a><a href="#path">Path Input</a><a href="#modal">Modal</a><a href="#scroll">Scrollbar</a>
   </aside>
   <main>
     <section id="overview" class="hero">
@@ -53,6 +53,11 @@ sdk.ui.badge({ label: '12 项' })</code></pre></section>
     <section id="tooltip" class="component"><h2>Tooltip</h2><p>为图标和短操作提供补充说明，支持悬停与键盘焦点。</p><div class="demo row"><span class="tooltip"><button class="button">悬停或聚焦</button><i>刷新当前插件数据</i></span></div><pre><code>sdk.ui.tooltip({ trigger, text: '刷新当前插件数据' })</code></pre></section>
     <section id="dropdown" class="component"><h2>Dropdown / Menu</h2><p>紧凑承载一组关联动作，并提供菜单语义和 Escape 关闭。</p><div class="demo row"><div class="dropdown"><button class="button" id="dropdown-trigger">更多操作</button><div class="dropdown-menu" hidden><button>重新同步</button><button>查看日志</button><button class="danger">删除任务</button></div></div></div><pre><code>sdk.ui.dropdown({ trigger, items: [{ label, value, onClick }] })</code></pre></section>
     <section id="progress" class="component"><h2>Progress</h2><p>展示下载、处理和同步进度，并通过 ARIA 暴露当前值。</p><div class="demo"><div class="progress"><span><i style="width:68%"></i></span><small>68%</small></div></div><pre><code>sdk.ui.progress({ value: 68, tone: 'info' })</code></pre></section>
+    <section id="choice" class="component"><h2>Checkbox / Radio</h2><p>多项选择使用 Checkbox，互斥选择使用同名 Radio。</p><div class="demo row"><label class="choice"><input type="checkbox" checked><i></i><span>生成 MediaInfo</span></label><label class="choice radio"><input type="radio" checked><i></i><span>自动模式</span></label></div><pre><code>sdk.ui.checkbox({ label: '生成 MediaInfo', checked, onChange })
+sdk.ui.radio({ label: '自动模式', name: 'mode', value: 'auto' })</code></pre></section>
+    <section id="alert" class="component"><h2>Alert</h2><p>展示需要保留在当前上下文中的提示、成功、警告和错误。</p><div class="demo"><div class="alert warning"><strong>请求已降速</strong><span>检测到服务限流，后台任务将在稍后继续。</span></div></div><pre><code>sdk.ui.alert({ tone: 'warning', title: '请求已降速', message })</code></pre></section>
+    <section id="empty" class="component"><h2>Empty / Loading</h2><p>为空数据和等待状态提供一致的反馈，也可以附加下一步操作。</p><div class="demo state-demo"><strong>暂无离线工程</strong><span>新建云下载或从云端目录选择文件。</span><button class="button primary">添加云下载</button></div><pre><code>sdk.ui.emptyState({ title, description, action })
+sdk.ui.loadingState({ text: '正在同步…' })</code></pre></section>
     <section id="input" class="component"><h2>Input</h2><p>遵循统一高度、字号、焦点环和背景。</p><div class="demo"><input class="input" value="http://192.168.31.3:9898"></div><pre><code>sdk.ui.input({ value, placeholder: '请输入地址' })</code></pre></section>
     <section id="switch" class="component"><h2>Settings Switch</h2><p>设置页布尔值的唯一标准控件。</p><div class="demo row"><label class="switch"><input type="checkbox" checked><i></i></label><span id="switch-value">已启用</span></div><pre><code>sdk.ui.settingsSwitch({ checked: true })</code></pre></section>
     <section id="setting-row" class="component"><h2>Setting Row</h2><p>左侧名称与说明，右侧完整承载当前值和操作。</p><div class="demo settings-card"><header><h3>STRM 与播放</h3></header><div class="setting-row"><div><strong>NOOR 播放入口</strong><small>由当前访问地址自动检测，也可以手动调整。</small></div><input class="input" value="http://192.168.31.3:9898"></div></div><pre><code>sdk.ui.settingRow({ label, description, control })</code></pre></section>
