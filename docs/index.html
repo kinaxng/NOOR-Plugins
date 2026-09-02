@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="NOOR Plugin SDK 设计系统与组件文档">
+  <title>NOOR Plugin SDK</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#overview"><i>N</i><span>NOOR</span><em>Plugin SDK</em></a>
+    <nav><a href="#guide">指南</a><a href="#components">组件</a><a href="https://github.com/kinaxng/NOOR-Plugins">GitHub</a></nav>
+  </header>
+  <aside class="sidebar">
+    <label>开始</label>
+    <a href="#overview">概览</a><a href="#principles">设计原则</a><a href="#usage">接入 SDK</a>
+    <label>基础</label>
+    <a href="#tokens">Design Tokens</a><a href="#typography">字体与层级</a>
+    <label>组件</label>
+    <a href="#button">Button</a><a href="#input">Input</a><a href="#switch">Settings Switch</a><a href="#setting-row">Setting Row</a><a href="#path">Path Input</a><a href="#modal">Modal</a><a href="#scroll">Scrollbar</a>
+  </aside>
+  <main>
+    <section id="overview" class="hero">
+      <span class="eyebrow">NOOR DESIGN SYSTEM</span>
+      <h1>为 NOOR 与插件提供<br><b>同一种设计语言</b></h1>
+      <p>统一组件、交互、设计令牌和可访问性。插件聚焦业务，不再重复制造界面基础设施。</p>
+      <div class="hero-actions"><a class="btn primary" href="#usage">开始使用</a><a class="btn" href="#components">浏览组件</a></div>
+      <div class="hero-grid"><article><strong>Single source</strong><span>NOOR 主程序是组件实现的唯一来源</span></article><article><strong>SDK first</strong><span>能力不足先升级 SDK，再开发插件</span></article><article><strong>Visual parity</strong><span>主程序与插件共享字体、尺寸和交互</span></article></div>
+    </section>
+
+    <section id="principles"><div class="section-head"><span>FOUNDATION</span><h2>设计原则</h2><p>组件不是供参考的截图，而是插件必须直接调用的运行时契约。</p></div><div class="cards"><article><b>01</b><h3>复用优先</h3><p>存在对应的 <code>sdk.ui</code> 组件时，插件不得重新实现。</p></article><article><b>02</b><h3>能力上收</h3><p>缺少状态、事件或布局能力时，先补充主程序 SDK。</p></article><article><b>03</b><h3>同步演进</h3><p>SDK 实现、本文档、示例与检查规则在同一阶段更新。</p></article></div></section>
+
+    <section id="usage"><div class="section-head"><span>GET STARTED</span><h2>接入 SDK</h2><p>插件入口的 <code>mount(root, sdk)</code> 会收到当前 NOOR 提供的完整能力。</p></div><pre><code>export async function mount(root, sdk) {
+  const enabled = sdk.ui.settingsSwitch({ checked: true })
+  const row = sdk.ui.settingRow({
+    label: '启用功能',
+    description: '说明该选项影响的行为。',
+    control: enabled,
+  })
+  root.append(sdk.ui.settingsCard({ title: '基础设置', children: [row] }))
+}</code></pre></section>
+
+    <section id="tokens"><div class="section-head"><span>FOUNDATION</span><h2>Design Tokens</h2><p>插件应使用变量表达视觉含义，禁止复制固定主题值。</p></div><div class="token-grid"><div><i style="--swatch:#0075ff"></i><code>--color-brand</code><span>#0075FF</span></div><div><i style="--swatch:#01b574"></i><code>--color-success</code><span>#01B574</span></div><div><i style="--swatch:#fbbf24"></i><code>--color-warning</code><span>#FBBF24</span></div><div><i style="--swatch:#e31a1a"></i><code>--color-error</code><span>#E31A1A</span></div></div></section>
+
+    <section id="typography"><div class="section-head"><span>FOUNDATION</span><h2>字体与层级</h2><p>所有 SDK 组件继承 NOOR 的显示字体与字号阶梯。</p></div><div class="demo type-demo"><h1>Display / 32</h1><h2>Section / 22</h2><h3>Component / 14</h3><p>Body / 13 — 清晰解释设置的作用与影响。</p><small>Metadata / 11</small></div></section>
+
+    <section id="components"><div class="section-head"><span>COMPONENTS</span><h2>组件</h2><p>以下预览使用文档站的镜像主题；生产插件必须调用对应的 <code>sdk.ui</code> API。</p></div></section>
+    <section id="button" class="component"><h2>Button</h2><p>用于动作、提交和次要操作。</p><div class="demo row"><button class="button primary">主要操作</button><button class="button">次要操作</button><button class="button" disabled>禁用</button></div><pre><code>sdk.ui.button({ label: '保存', tone: 'primary', onClick: save })</code></pre></section>
+    <section id="input" class="component"><h2>Input</h2><p>遵循统一高度、字号、焦点环和背景。</p><div class="demo"><input class="input" value="http://192.168.31.3:9898"></div><pre><code>sdk.ui.input({ value, placeholder: '请输入地址' })</code></pre></section>
+    <section id="switch" class="component"><h2>Settings Switch</h2><p>设置页布尔值的唯一标准控件。</p><div class="demo row"><label class="switch"><input type="checkbox" checked><i></i></label><span id="switch-value">已启用</span></div><pre><code>sdk.ui.settingsSwitch({ checked: true })</code></pre></section>
+    <section id="setting-row" class="component"><h2>Setting Row</h2><p>左侧名称与说明，右侧完整承载当前值和操作。</p><div class="demo settings-card"><header><h3>STRM 与播放</h3></header><div class="setting-row"><div><strong>NOOR 播放入口</strong><small>由当前访问地址自动检测，也可以手动调整。</small></div><input class="input" value="http://192.168.31.3:9898"></div></div><pre><code>sdk.ui.settingRow({ label, description, control })</code></pre></section>
+    <section id="path" class="component"><h2>Path Input</h2><p>对应 NOOR“设置 → 存储”的路径输入与目录弹窗。</p><div class="demo settings-card"><div class="setting-row"><div><strong>本地 STRM incoming</strong><small>选择 NOOR 可以访问的本地目录。</small></div><div class="path"><input class="input" value="/data/strm/av/incoming" readonly><button aria-label="选择目录">▱</button></div></div></div><pre><code>sdk.ui.settingPath({ value, onBrowse })</code></pre></section>
+    <section id="modal" class="component"><h2>Modal</h2><p>统一标题栏、固定操作区、焦点与滚动行为。</p><div class="demo"><button class="button primary" id="open-modal">打开示例弹窗</button></div><pre><code>sdk.ui.modal({ title, content, footer, headerActions })</code></pre></section>
+    <section id="scroll" class="component"><h2>Scrollbar</h2><p>SDK 弹窗和 <code>noor-plugin-scroll</code> 自动获得统一滚动条。</p><div class="demo scroll-demo noor-scroll"></div><pre><code>element.classList.add('noor-plugin-scroll')</code></pre></section>
+  </main>
+  <div class="modal-mask" id="modal-demo" hidden><div class="modal"><header><strong>示例弹窗</strong><button data-close>×</button></header><div class="modal-body noor-scroll"><div class="settings-card"><header><h3>基础设置</h3></header><div class="setting-row"><div><strong>启用组件</strong><small>该示例用于验证 SDK 的弹窗与滚动样式。</small></div><label class="switch"><input type="checkbox" checked><i></i></label></div></div><p class="filler">滚动区域由 SDK 统一控制。<br>标题和底部操作区保持稳定。<br><br>插件不需要定义自己的滚动条。<br><br>新增能力应先进入 SDK。<br><br>文档与组件同步演进。</p></div><footer><button class="button" data-close>取消</button><button class="button primary" data-close>确定</button></footer></div></div>
+  <script src="./app.js"></script>
+</body>
+</html>

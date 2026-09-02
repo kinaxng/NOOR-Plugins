@@ -1,5 +1,7 @@
 # NOOR Plugins
 
+[Plugin SDK 文档与组件展示](https://kinaxng.github.io/NOOR-Plugins/)
+
 NOOR 官方插件仓库、插件市场索引与 Plugin SDK。
 
 将仓库地址 `https://github.com/kinaxng/NOOR-Plugins` 添加到 NOOR 插件市场后，即可浏览和安装这里的插件。官方 NOOR 发行版会在首次启动时自动加入该源。
