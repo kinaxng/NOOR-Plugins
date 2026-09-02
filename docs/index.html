@@ -6,6 +6,7 @@
   <meta name="description" content="NOOR Plugin SDK 设计系统与组件文档">
   <title>NOOR Plugin SDK</title>
   <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./components.css">
 </head>
 <body>
   <header class="topbar">
@@ -18,7 +19,7 @@
     <label>基础</label>
     <a href="#tokens">Design Tokens</a><a href="#typography">字体与层级</a>
     <label>组件</label>
-    <a href="#button">Button</a><a href="#input">Input</a><a href="#switch">Settings Switch</a><a href="#setting-row">Setting Row</a><a href="#path">Path Input</a><a href="#modal">Modal</a><a href="#scroll">Scrollbar</a>
+    <a href="#button">Button</a><a href="#tag">Tag / Badge</a><a href="#tooltip">Tooltip</a><a href="#dropdown">Dropdown</a><a href="#progress">Progress</a><a href="#input">Input</a><a href="#switch">Settings Switch</a><a href="#setting-row">Setting Row</a><a href="#path">Path Input</a><a href="#modal">Modal</a><a href="#scroll">Scrollbar</a>
   </aside>
   <main>
     <section id="overview" class="hero">
@@ -47,6 +48,11 @@
 
     <section id="components"><div class="section-head"><span>COMPONENTS</span><h2>组件</h2><p>以下预览使用文档站的镜像主题；生产插件必须调用对应的 <code>sdk.ui</code> API。</p></div></section>
     <section id="button" class="component"><h2>Button</h2><p>用于动作、提交和次要操作。</p><div class="demo row"><button class="button primary">主要操作</button><button class="button">次要操作</button><button class="button" disabled>禁用</button></div><pre><code>sdk.ui.button({ label: '保存', tone: 'primary', onClick: save })</code></pre></section>
+    <section id="tag" class="component"><h2>Tag / Badge</h2><p>Tag 表达分类，Badge 表达状态或可操作筛选。</p><div class="demo row"><span class="tag info">信息</span><span class="tag success">已完成</span><span class="tag warning">等待中</span><span class="badge">12 项</span></div><pre><code>sdk.ui.tag({ label: '已完成', tone: 'success' })
+sdk.ui.badge({ label: '12 项' })</code></pre></section>
+    <section id="tooltip" class="component"><h2>Tooltip</h2><p>为图标和短操作提供补充说明，支持悬停与键盘焦点。</p><div class="demo row"><span class="tooltip"><button class="button">悬停或聚焦</button><i>刷新当前插件数据</i></span></div><pre><code>sdk.ui.tooltip({ trigger, text: '刷新当前插件数据' })</code></pre></section>
+    <section id="dropdown" class="component"><h2>Dropdown / Menu</h2><p>紧凑承载一组关联动作，并提供菜单语义和 Escape 关闭。</p><div class="demo row"><div class="dropdown"><button class="button" id="dropdown-trigger">更多操作</button><div class="dropdown-menu" hidden><button>重新同步</button><button>查看日志</button><button class="danger">删除任务</button></div></div></div><pre><code>sdk.ui.dropdown({ trigger, items: [{ label, value, onClick }] })</code></pre></section>
+    <section id="progress" class="component"><h2>Progress</h2><p>展示下载、处理和同步进度，并通过 ARIA 暴露当前值。</p><div class="demo"><div class="progress"><span><i style="width:68%"></i></span><small>68%</small></div></div><pre><code>sdk.ui.progress({ value: 68, tone: 'info' })</code></pre></section>
     <section id="input" class="component"><h2>Input</h2><p>遵循统一高度、字号、焦点环和背景。</p><div class="demo"><input class="input" value="http://192.168.31.3:9898"></div><pre><code>sdk.ui.input({ value, placeholder: '请输入地址' })</code></pre></section>
     <section id="switch" class="component"><h2>Settings Switch</h2><p>设置页布尔值的唯一标准控件。</p><div class="demo row"><label class="switch"><input type="checkbox" checked><i></i></label><span id="switch-value">已启用</span></div><pre><code>sdk.ui.settingsSwitch({ checked: true })</code></pre></section>
     <section id="setting-row" class="component"><h2>Setting Row</h2><p>左侧名称与说明，右侧完整承载当前值和操作。</p><div class="demo settings-card"><header><h3>STRM 与播放</h3></header><div class="setting-row"><div><strong>NOOR 播放入口</strong><small>由当前访问地址自动检测，也可以手动调整。</small></div><input class="input" value="http://192.168.31.3:9898"></div></div><pre><code>sdk.ui.settingRow({ label, description, control })</code></pre></section>
