@@ -263,7 +263,9 @@ def _detail_is_cracked(detail: dict[str, Any]) -> bool:
     )
 
 
-def _merge_latest_detail(config: dict[str, Any], item: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+def _normalize_library(item: dict[str, Any]) -> dict[str, Any]:
+    library = item.get("library")
+    return dict(library) if isinstance(library, dict) else {}
     merged = dict(item)
     raw = dict(item.get("raw") or {})
     raw["detail_enriched"] = True
@@ -278,8 +280,9 @@ def _merge_latest_detail(config: dict[str, Any], item: dict[str, Any], detail: d
         merged["cover_url"] = _abs(config, detail.get("cover_url"))
     if not merged.get("thumb_url"):
         merged["thumb_url"] = _abs(config, detail.get("thumb_url"))
-    if isinstance(detail.get("library"), dict):
-        merged["library"] = detail.get("library") or merged.get("library") or {}
+    detail_library = _normalize_library(detail)
+    if detail_library:
+        merged["library"] = detail_library
     magnets = detail.get("magnets") if isinstance(detail.get("magnets"), list) else []
     if magnets and not int(merged.get("magnets_count") or 0):
         merged["magnets_count"] = len(magnets)
@@ -392,7 +395,7 @@ def _normalize_movie(config: dict[str, Any], item: dict[str, Any]) -> dict[str, 
         "play_subtitle": int(item.get("play_subtitle") or 0),
         "can_play": bool(item.get("can_play")),
         "is_cracked": _is_cracked_movie(item),
-        "library": item.get("library") if isinstance(item.get("library"), dict) else {},
+        "library": _normalize_library(item),
         "raw": item,
     }
 
@@ -678,7 +681,7 @@ def _ed2k_url(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    match = re.search(r"ed2k://\S+", text, re.I)
+    match = re.search(r"ed2k://\|file\|[^|\r\n]+\|\d+\|[a-f0-9]{32}\|(?:[^\r\n]*?\|)?/", text, re.I)
     return match.group(0).rstrip('\\\"\'<>),;') if match else ""
 
 
@@ -871,7 +874,7 @@ async def _resource_search(config: dict[str, Any], payload: dict[str, Any]) -> l
 
     if code:
         try:
-            video = await _video_with_aliases(config, code, require_resources=True)
+            video = await _video_with_aliases(config, code, refresh=bool(payload.get('refresh')), require_resources=True)
             if expected_magnets_count > 0 and len(video.get("magnets") or []) < expected_magnets_count:
                 video = await _video_with_aliases(
                     config,
@@ -1115,6 +1118,7 @@ async def _video(config: dict[str, Any], code: str, *, refresh: bool = False) ->
     if not isinstance(data, dict):
         return {}
     out = dict(data)
+    out["library"] = _normalize_library(out)
     out["cover_url"] = _abs(config, out.get("cover_url"))
     out["thumb_url"] = _abs(config, out.get("thumb_url"))
     out["previews"] = [_abs(config, x) for x in (out.get("previews") or [])]

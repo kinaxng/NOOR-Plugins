@@ -1,0 +1,66 @@
+{
+  "id": "featured-performers",
+  "name": "精选女优",
+  "version": "0.8.0",
+  "type": "tool",
+  "description": "通过 CloudDrive2 缓存直接管理精选作者剧集库、年份季、作品 NFO 与图片，不创建 STRM。",
+  "tags": [
+    "media",
+    "nfo",
+    "performer",
+    "clouddrive2"
+  ],
+  "capabilities": [
+    "sidebar_page",
+    "network_outbound"
+  ],
+  "enabled_by_default": true,
+  "config_schema": {
+    "cd2_endpoint": {
+      "type": "string",
+      "label": "CloudDrive2 地址",
+      "default": "192.168.31.10:19798",
+      "description": "CD2 gRPC 服务地址，不含 http(s)://。"
+    },
+    "cd2_root": {
+      "type": "string",
+      "label": "CD2 规范路径前缀",
+      "default": "/dbonline/国产精选",
+      "description": "现有精选女优状态中使用的完整 115 路径前缀。"
+    },
+    "cd2_token": {
+      "type": "password",
+      "label": "CloudDrive2 API Token",
+      "secret": true,
+      "description": "建议使用根目录限制为 /115open/dbonline/国产精选 的专用 Token。"
+    },
+    "madouqu_cookie": {
+      "type": "password",
+      "label": "麻豆区 Cookie（可选）",
+      "description": "仅当代理出口需要浏览器会话时填写；用于复用浏览器已通过的麻豆区会话。"
+    },
+    "madouqu_user_agent": {
+      "type": "password",
+      "label": "麻豆区 User-Agent（可选）",
+      "description": "绑定时由当前浏览器自动传入，用于匹配 Cookie 的浏览器会话。"
+    }
+  },
+  "default_config": {
+    "cd2_endpoint": "192.168.31.10:19798",
+    "cd2_root": "/dbonline/国产精选"
+  },
+  "contributions": {
+    "sidebar": {
+      "label": "精选女优",
+      "route": "/plugins/featured-performers",
+      "icon": "icons/service.svg"
+    },
+    "icon": "icons/service.svg"
+  },
+  "frontend": {
+    "type": "module",
+    "entry": "frontend/page.js",
+    "style": "frontend/style.css"
+  },
+  "ui_sdk_strict": true
+}

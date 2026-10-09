@@ -685,6 +685,7 @@ export async function mount(root, sdk) {
       defaultMode: 'loose',
       requireCracked: false,
       requireSubtitle: false,
+      allowNormal: false,
     }
     try {
       if (sdk.subscription?.open) {

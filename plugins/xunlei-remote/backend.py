@@ -1340,8 +1340,8 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
             if not task_id:
                 raise ValueError("missing task id")
             daily_limit = _extract_task_daily_limit(device_info)
-            if action == "retry_task" and _is_task_daily_limit_active(daily_limit):
-                raise ValueError(f"{_task_daily_limit_message(daily_limit)}；已阻止重试以避免迅雷 NAS 将失败任务从列表中移除")
+            if action in {"resume_task", "retry_task"} and _is_task_daily_limit_active(daily_limit):
+                raise ValueError(f"{_task_daily_limit_message(daily_limit)}；已阻止继续以避免迅雷 NAS 将失败任务从列表中移除")
             phase = {"pause_task": "pause", "resume_task": "running", "retry_task": "running", "delete_task_files": "delete"}[action]
             return await _operate_task(config, client, pan_auth, device_id, task_id, phase)
         if action == "delete_tasks":

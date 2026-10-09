@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,12 @@ async def run_ffprobe(url: str, *, timeout: int) -> dict[str, Any]:
     return parse_ffprobe(json.loads(stdout.decode("utf-8")))
 
 
+def _safe_probe_error(exc: Exception) -> str:
+    message = str(exc)
+    message = re.sub(r"([?&]token=)[^&\s]+", r"\1<redacted>", message)
+    return message[:1000]
+
+
 async def process_next(config: dict[str, Any]) -> dict[str, Any] | None:
     record = await asyncio.to_thread(next_mediainfo)
     if not record:
@@ -109,9 +116,10 @@ async def process_next(config: dict[str, Any]) -> dict[str, Any] | None:
             dedupe_key=f"115.mediainfo.ready:{media.file_id}:{media.sha1}:{media.size}:v{SCHEMA_VERSION}")
         return {"file_id": media.file_id, "status": "ready", "cache_path": str(cache_path)}
     except Exception as exc:
+        safe_error = _safe_probe_error(exc)
         attempts = record.attempts + 1
         terminal = attempts >= max_attempts
         delay = min(3600, 60 * (2 ** max(0, attempts - 1)))
         await asyncio.to_thread(update_mediainfo, record.file_id, status="failed" if terminal else "retry", attempts=attempts,
-            next_retry_at=None if terminal else utcnow() + timedelta(seconds=delay), error_message=str(exc)[:1000])
-        return {"file_id": record.file_id, "status": "failed" if terminal else "retry", "error": str(exc)}
+            next_retry_at=None if terminal else utcnow() + timedelta(seconds=delay), error_message=safe_error)
+        return {"file_id": record.file_id, "status": "failed" if terminal else "retry", "error": safe_error}

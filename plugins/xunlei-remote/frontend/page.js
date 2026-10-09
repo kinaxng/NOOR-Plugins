@@ -196,7 +196,7 @@ export async function mount(el, sdk = {}) {
       for (const button of box.querySelectorAll('[data-residual-index]')) {
         button.onclick = async () => {
           const item = items[Number(button.dataset.residualIndex)]
-          const ok = await (sdk.ui?.confirm ? sdk.ui.confirm({ title: '删除残留文件', message: item.path, confirmText: '删除并搜索', danger: true }) : Promise.resolve(confirm(`删除 ${item.path}？`)))
+          const ok = await sdk.ui.confirm({ title: '删除残留文件', message: item.path, confirmText: '删除并搜索', danger: true })
           if (!ok) return
           button.disabled = true
           try {
@@ -649,7 +649,7 @@ export async function mount(el, sdk = {}) {
     state.actioning.add(id)
     try {
       const ok = action === 'delete_tasks'
-        ? await (sdk.ui?.confirm ? sdk.ui.confirm({ title: '删除任务', message: '只删除迅雷任务，不删除已下载文件。', confirmText: '删除', danger: true }) : Promise.resolve(confirm('删除任务？')))
+        ? await sdk.ui.confirm({ title: '删除任务', message: '只删除迅雷任务，不删除已下载文件。', confirmText: '删除', danger: true })
         : true
       if (!ok) return
       const r = await api(`/actions/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload: { id, ids: [id] } }) })

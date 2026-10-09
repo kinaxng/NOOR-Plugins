@@ -2,19 +2,110 @@
   "name": "NOOR Official Plugins",
   "repository": "https://github.com/kinaxng/NOOR-Plugins",
   "plugins": [
-    {"id":"115","name":"115","version":"0.7.0","description":"115 Open Platform 离线下载、稳定 STRM、302 播放与增量 MediaInfo。","source_dir":"plugins/115"},
-    {"id":"av-recommend","name":"推荐中心","version":"1.58.0","description":"融合 MDC-NG 演员身份、历史时间回测门控、多尺度偏好、扩展 Core 传播与影子评估的推荐中心。","source_dir":"plugins/av-recommend"},
-    {"id":"avdb","name":"AVDB","version":"0.1.0","description":"通过独立 AVDB API 搜索影片资源。","source_dir":"plugins/avdb"},
-    {"id":"gfriends","name":"Gfriends","version":"0.1.0","description":"演员头像库辅助工具。","source_dir":"plugins/gfriends"},
-    {"id":"javdb","name":"JavDB","version":"0.1.0","description":"JavDB 元数据、搜索、磁链与图谱接入。","source_dir":"plugins/javdb"},
-    {"id":"local-subtitle-library","name":"本地字幕库","version":"0.2.0","description":"支持索引与模糊匹配的本地字幕搜索源。","source_dir":"plugins/local-subtitle-library"},
-    {"id":"mdc-ng-manual","name":"MDC-NG 手动任务","version":"0.1.0","description":"向 MDC-NG 提交整理任务并查看结果。","source_dir":"plugins/mdc-ng-manual"},
-    {"id":"mteam-plugin","name":"M-Team","version":"0.2.0","description":"M-Team RSS、资源、字幕与下载推送。","source_dir":"plugins/mteam-plugin"},
-    {"id":"qbittorrent","name":"qBittorrent","version":"0.3.1","description":"qBittorrent 下载器和任务管理。","source_dir":"plugins/qbittorrent"},
-    {"id":"subscription-core","name":"订阅中心","version":"0.1.1","description":"NOOR 官方订阅与洗版中心。","source_dir":"plugins/subscription-core"},
-    {"id":"transmission","name":"Transmission","version":"0.1.0","description":"Transmission RPC 下载器。","source_dir":"plugins/transmission"},
-    {"id":"widget-system","name":"系统监控","version":"0.2.0","description":"CPU、内存、GPU 与显存监控组件。","source_dir":"plugins/widget-system"},
-    {"id":"xunlei-remote","name":"迅雷远程","version":"0.1.0","description":"迅雷 NAS 远程下载管理。","source_dir":"plugins/xunlei-remote"},
-    {"id":"xunlei-subtitle","name":"迅雷字幕","version":"0.2.0","description":"迅雷在线字幕搜索源。","source_dir":"plugins/xunlei-subtitle"}
+    {
+      "id": "115",
+      "name": "115",
+      "version": "0.13.5",
+      "description": "115 Open Platform 离线下载、稳定 STRM 与媒体情报流水线。",
+      "source_dir": "plugins/115"
+    },
+    {
+      "id": "av-recommend",
+      "name": "推荐中心",
+      "version": "1.64.2",
+      "description": "基于媒体库偏好、JavDB 候选、完整候选池与资源可用性的推荐中心。",
+      "source_dir": "plugins/av-recommend"
+    },
+    {
+      "id": "avdb",
+      "name": "AVDB",
+      "version": "0.1.1",
+      "description": "通过独立 AVDB article/torrent API 搜索影片资源。",
+      "source_dir": "plugins/avdb"
+    },
+    {
+      "id": "gfriends",
+      "name": "Gfriends",
+      "version": "0.1.0",
+      "description": "演员头像库辅助工具。",
+      "source_dir": "plugins/gfriends"
+    },
+    {
+      "id": "javdb",
+      "name": "JavDB",
+      "version": "0.1.1",
+      "description": "JavDB/DB Online 接入：榜单、最新、搜索、演员、Top250、磁链、ED2K 与元数据。",
+      "source_dir": "plugins/javdb"
+    },
+    {
+      "id": "local-subtitle-library",
+      "name": "本地字幕库",
+      "version": "0.2.0",
+      "description": "支持索引与模糊匹配的本地字幕搜索源。",
+      "source_dir": "plugins/local-subtitle-library"
+    },
+    {
+      "id": "mdc-ng-manual",
+      "name": "MDC-NG 手动任务",
+      "version": "0.2.0",
+      "description": "向 MDC-NG 的手动任务页提交整理任务，并回看最近任务结果。",
+      "source_dir": "plugins/mdc-ng-manual"
+    },
+    {
+      "id": "mteam-plugin",
+      "name": "M-Team",
+      "version": "0.2.1",
+      "description": "M-Team PT integration: RSS feed, API cover lookup, download push and subtitle search",
+      "source_dir": "plugins/mteam-plugin"
+    },
+    {
+      "id": "qbittorrent",
+      "name": "qBittorrent",
+      "version": "0.3.2",
+      "description": "qBittorrent 下载器接入，兼容密码 Cookie 与 5.2+ API Key。",
+      "source_dir": "plugins/qbittorrent"
+    },
+    {
+      "id": "subscription-core",
+      "name": "订阅中心",
+      "version": "0.1.3",
+      "description": "NOOR 官方内置订阅与洗版中心。",
+      "source_dir": "plugins/subscription-core"
+    },
+    {
+      "id": "transmission",
+      "name": "Transmission",
+      "version": "0.1.0",
+      "description": "Transmission RPC 下载器。",
+      "source_dir": "plugins/transmission"
+    },
+    {
+      "id": "widget-system",
+      "name": "系统监控",
+      "version": "0.2.0",
+      "description": "CPU、内存、GPU 与显存监控组件。",
+      "source_dir": "plugins/widget-system"
+    },
+    {
+      "id": "xunlei-remote",
+      "name": "迅雷远程",
+      "version": "0.1.1",
+      "description": "通过群晖迅雷 NAS Web API 管理远程下载任务，并自动使用可用的试用加速次数。",
+      "source_dir": "plugins/xunlei-remote"
+    },
+    {
+      "id": "xunlei-subtitle",
+      "name": "迅雷字幕",
+      "version": "0.2.0",
+      "description": "迅雷在线字幕搜索源。",
+      "source_dir": "plugins/xunlei-subtitle"
+    },
+    {
+      "id": "featured-performers",
+      "name": "精选女优",
+      "version": "0.8.0",
+      "description": "通过 CloudDrive2 缓存直接管理精选作者剧集库、年份季、作品 NFO 与图片，不创建 STRM。",
+      "source_dir": "plugins/featured-performers"
+    }
   ]
 }

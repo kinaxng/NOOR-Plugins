@@ -30,6 +30,32 @@ _scheduler_stop: asyncio.Event | None = None
 _run_lock = asyncio.Lock()
 
 
+def _subscription_downloader_lane(sub: dict[str, Any]) -> str:
+    """Return the scheduler lane without resolving or submitting the resource."""
+    submitted = str(sub.get("submitted_downloader_id") or "").strip()
+    if submitted:
+        return submitted
+    best = sub.get("best_resource") if isinstance(sub.get("best_resource"), dict) else {}
+    resource = best.get("resource") if isinstance(best.get("resource"), dict) else best
+    preferred = str(resource.get("preferred_downloader") or best.get("preferred_downloader") or "").strip()
+    return preferred or "discovery"
+
+
+def _limit_targets_per_downloader(targets: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Apply the scheduler batch limit independently to each downloader."""
+    if limit <= 0:
+        return targets
+    counts: dict[str, int] = {}
+    selected: list[dict[str, Any]] = []
+    for sub in targets:
+        lane = _subscription_downloader_lane(sub)
+        if counts.get(lane, 0) >= limit:
+            continue
+        counts[lane] = counts.get(lane, 0) + 1
+        selected.append(sub)
+    return selected
+
+
 def _select_enabled_downloader(preferred: str, compatible: list[str], runtime: Any) -> str:
     """Select the preferred compatible downloader only when it is actually enabled."""
     candidates: list[str] = []
@@ -133,6 +159,7 @@ def _event(data: dict[str, Any], subscription_id: str, level: str, message: str,
     events.insert(0, {
         "id": uuid.uuid4().hex,
         "subscription_id": subscription_id,
+        "code": next((s.get("code", "") for s in data.get("subscriptions", []) if s.get("id") == subscription_id), ""),
         "level": level,
         "message": message,
         "payload": payload or {},
@@ -174,8 +201,9 @@ async def _sync_core_history(data: dict[str, Any]) -> int:
     revision = hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     if revision == _core_history_revision:
         return 0
+    active = [sub for sub in data.get("subscriptions") or [] if isinstance(sub, dict) and sub.get("status") != "deleted" and sub.get("id") and sub.get("code")]
     recorded = 0
-    for row, sub in zip(rows, [sub for sub in data.get("subscriptions") or [] if isinstance(sub, dict) and sub.get("status") != "deleted" and sub.get("id") and sub.get("code")]):
+    for row, sub in zip(rows, active):
         await _record_core_outcome(sub, "subscription", {
             "evidence_id": f"{row['id']}:subscription",
             "observed_at": row["created_at"],
@@ -499,7 +527,7 @@ def _media_quality_profile(media_item: dict[str, Any] | None, sub: dict[str, Any
         "has_subtitle": bool(tags.get("has_chinese") or int((media_item or {}).get("subtitle_count") or 0) > 0),
         "is_new_model_uncensored_crack": is_new_model_uncensored_crack,
         "resolution_rank": _resolution_rank(text),
-        "size_bytes": int((sub or {}).get("current_size_bytes") or 0) or _file_size(path),
+        "size_bytes": int((media_item or {}).get("size_bytes") or (sub or {}).get("current_size_bytes") or 0),
     }
 
 
@@ -514,17 +542,31 @@ def _resource_quality_profile(resource: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _quality_score_from_features(features: dict[str, bool], text: str = "") -> int:
-    score = 0
-    if features.get("is_cracked"):
-        score += 40
-    if features.get("has_subtitle"):
-        score += 30
-    if features.get("is_new_model_uncensored_crack"):
-        score += 20
-    # 洗版判断必须保守：只有当前库与候选都能稳定识别的版本特征才参与。
-    # 分辨率/HD/文件大小先不参与洗版评分，避免候选标题写了 HD 而当前库缺少同等元数据时误判。
-    return score
+VERSION_SCORES = {'normal': 0, 'subtitle': 30, 'cracked': 40, 'cracked_subtitle': 70, 'new_model': 60, 'new_model_subtitle': 90}
+
+
+def _version_scores(config=None):
+    if config is None:
+        try:
+            from app.plugins.runtime import runtime
+            config = runtime.get_config('subscription-core')
+        except Exception:
+            config = {}
+    return {**VERSION_SCORES, **(config.get('version_scores') or {})}
+
+
+def _version_key(features):
+    if features.get('is_new_model_uncensored_crack'):
+        key = 'new_model_subtitle' if features.get('has_subtitle') else 'new_model'
+    elif features.get('is_cracked'):
+        key = 'cracked_subtitle' if features.get('has_subtitle') else 'cracked'
+    else:
+        key = 'subtitle' if features.get('has_subtitle') else 'normal'
+    return key
+
+
+def _quality_score_from_features(features: dict[str, bool], text: str = "", config=None) -> int:
+    return int(_version_scores(config)[_version_key(features)])
 
 
 def _score_resource(resource: dict[str, Any]) -> int:
@@ -563,7 +605,7 @@ def _upgrade_improvement(sub: dict[str, Any], resource: dict[str, Any], config: 
     if sub.get("type") != "upgrade":
         return True, int(sub.get("current_score") or 0), candidate_score, 0, "订阅任务不需要洗版比较"
     current_score = int(sub.get("current_score") or 0)
-    threshold = max(0, int(config.get("upgrade_score_threshold") or 20))
+    threshold = max(0, int(config.get("upgrade_score_threshold", 20)))
     current_profile = {
         "is_cracked": bool(sub.get("current_is_cracked")),
         "has_subtitle": bool(sub.get("current_has_subtitle")),
@@ -572,6 +614,11 @@ def _upgrade_improvement(sub: dict[str, Any], resource: dict[str, Any], config: 
         "size_bytes": int(sub.get("current_size_bytes") or 0),
     }
     candidate_profile = _resource_quality_profile(resource)
+    if config.get('version_scores'):
+        current_score = _quality_score_from_features(current_profile, config=config)
+        candidate_score = _quality_score_from_features(candidate_profile, config=config)
+        improvement = candidate_score - current_score
+        return improvement > 0 and improvement >= threshold, current_score, candidate_score, threshold, f'版本评分提升 {improvement:+d}，要求至少 +{threshold}'
     if candidate_profile.get("is_cracked") and not current_profile.get("is_cracked"):
         return True, current_score, candidate_score, threshold, "破解版本优先"
     if candidate_profile.get("is_new_model_uncensored_crack") and not current_profile.get("is_new_model_uncensored_crack"):
@@ -663,11 +710,15 @@ def _resource_kind(resource: dict[str, Any]) -> str:
     return "ed2k" if url.startswith("ed2k://") else "torrent"
 
 
-def _matches(sub: dict[str, Any], resource: dict[str, Any]) -> tuple[bool, str]:
+def _matches(sub: dict[str, Any], resource: dict[str, Any], config=None) -> tuple[bool, str]:
     mode = str(sub.get("mode") or "loose")
     require_cracked = bool(sub.get("require_cracked"))
     require_subtitle = bool(sub.get("require_subtitle"))
     f = _features(resource)
+    if (config or {}).get('version_enabled', {}).get(_version_key(f), True) is False:
+        return False, '该版本类别已关闭'
+    if mode == "loose" and sub.get("allow_normal") is not True and _version_key(f) == "normal":
+        return False, "普通版本未启用"
     if mode == "strict":
         if require_cracked and not f["is_cracked"]:
             return False, "缺少破解"
@@ -676,50 +727,37 @@ def _matches(sub: dict[str, Any], resource: dict[str, Any]) -> tuple[bool, str]:
     return True, "匹配"
 
 
-def _preference_rank(sub: dict[str, Any], resource: dict[str, Any]) -> tuple[int, int, int, int]:
+def _preference_rank(sub: dict[str, Any], resource: dict[str, Any], config: dict[str, Any] | None = None) -> tuple:
     f = _features(resource)
-    if f.get("is_new_model_uncensored_crack") and f["has_subtitle"]:
-        tier = -1
-    elif f["is_cracked"] and f["has_subtitle"]:
-        tier = 0
-    elif f["is_cracked"]:
-        tier = 1
-    elif f["has_subtitle"]:
-        tier = 2
-    else:
-        tier = 3
-    # Prefer the normal torrent path when both candidates satisfy the same
-    # subscription profile; ED2K is the explicit 115 fallback.
+    order = [('require_cracked', 'is_cracked'), ('require_subtitle', 'has_subtitle')]
+    if (config or {}).get('preference_priority') == 'subtitle':
+        order.reverse()
+    tier = tuple(-int(bool(f[feature])) for flag, feature in order if sub.get(flag))
+    if (config or {}).get('version_scores'):
+        selected = dict(f)
+        if 'version_enabled' not in (config or {}) and (sub.get('require_cracked') or sub.get('require_subtitle')):
+            if not sub.get('require_cracked'):
+                selected['is_cracked'] = False
+                selected['is_new_model_uncensored_crack'] = False
+            if not sub.get('require_subtitle'): selected['has_subtitle'] = False
+        tier = (-_quality_score_from_features(selected, config=config),)
+    # A magnet/torrent remains the normal choice. ED2K is a deliberate
+    # fallback: it wins only when it is the better matching candidate (for
+    # example, the available magnets do not satisfy the subscription's
+    # cracked/subtitle requirements).
     kind_rank = 1 if _resource_kind(resource) == "ed2k" else 0
     return (tier, kind_rank, -_score_resource(resource), -int(resource.get("size_bytes") or 0))
 
 
 async def _find_media(code: str, *aliases: Any) -> dict[str, Any] | None:
-    try:
-        from app.api.endpoints import media_library as media_api
-
-        config = media_api._load_config()
-        if not config.get("server_url") or not config.get("api_key"):
-            return None
-        libraries = await media_api._list_libraries(config)
-        raw_enabled = str(config.get("enabled_library_ids") or "")
-        enabled_ids = [x.strip() for x in raw_enabled.split(",") if x.strip()]
-        target_ids = enabled_ids or [lib.get("id") for lib in libraries if lib.get("id")]
-        queries = _code_lookup_values(code, *aliases)
-        targets = {_norm_code(x) for x in queries if _norm_code(x)}
-        if not queries or not targets:
-            return None
-        for library_id in target_ids:
-            for query in queries:
-                items, _ = await media_api._list_items(config, library_id, limit=12, offset=0, q=query)
-                for item in items:
-                    nfo = item.get("nfo") if isinstance(item.get("nfo"), dict) else {}
-                    text = " ".join(str(x or "") for x in [nfo.get("num"), item.get("name"), nfo.get("title"), item.get("path")])
-                    norm_text = _norm_code(text)
-                    if any(target and target in norm_text for target in targets):
-                        return item
-    except Exception:
-        return None
+    from app.core.ownership import ownership
+    values = [str(x) for x in (code, *aliases) if x]
+    result = await ownership.lookup(values)
+    for state in result["results"].values():
+        if state["items"]:
+            return max(state["items"], key=_score_media_item)
+    if any(x["state"] == "unknown" for x in result["results"].values()):
+        raise RuntimeError("媒体库状态未知，请等待 Core 同步后重试")
     return None
 
 
@@ -752,15 +790,24 @@ async def _select_imported_variant(media: dict[str, Any], resource: dict[str, An
 
 async def _search_resources(code: str, limit: int = 24) -> list[dict[str, Any]]:
     from app.plugins.runtime import runtime
+    from app.core.resource_links import invalid_ed2k
+    from app.knowledge.intelligence import invalidate_bad_resource_links
 
     query = {"keyword": code, "q": code, "code": code, "number": code, "limit": limit, "mode": "deep", "page": 1, "max_items": 100}
+    bad_providers = await invalidate_bad_resource_links(code)
     data = await runtime.search_resources({**query, "intelligence_cache": "prefer"}, limit_per_plugin=limit)
     groups = data.get("groups") if isinstance(data, dict) else data
+    groups = list(groups or [])
+    bad_providers.update(group.get('provider') for group in groups if any(invalid_ed2k(item) for item in group.get('items', []) if isinstance(item, dict)))
+    if bad_providers:
+        fresh = await runtime.search_resources({**query, 'refresh': True}, provider_ids=sorted(p for p in bad_providers if p), limit_per_plugin=limit)
+        groups = [group for group in groups if group.get('provider') not in bad_providers] + list(fresh.get('groups') or [])
+        await invalidate_bad_resource_links(code)
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for group in groups or []:
         for item in group.get("items") or []:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or invalid_ed2k(item):
                 continue
             key = f"{item.get('provider')}:{item.get('id')}:{item.get('url')}"
             if key in seen:
@@ -808,7 +855,11 @@ def _candidate_snapshot(resource: dict[str, Any], *, current_score: int = 0, thr
 
 def _public_subscription(sub: dict[str, Any]) -> dict[str, Any]:
     out = dict(sub)
+    out["allow_normal"] = sub.get("allow_normal") is True
     best = out.get("best_resource") if isinstance(out.get("best_resource"), dict) else {}
+    url = str(best.get("url") or "")
+    if out.get("last_submit_error") and url.lower().startswith("ed2k://") and not re.search(r"\|\d+\|[a-fA-F0-9]{32}\|/", url):
+        out["last_submit_error"] = "ED2K 链接不完整（缺少文件大小或哈希），115 拒绝接收。请重新检测获取完整链接。原始错误：" + str(out["last_submit_error"])
     if not out.get("fanart_url"):
         out["fanart_url"] = best.get("fanart_url") or best.get("cover_url") or out.get("cover_url") or ""
     out["image_candidates"] = _image_candidates(out, best)
@@ -837,6 +888,20 @@ def _public_subscription(sub: dict[str, Any]) -> dict[str, Any]:
         }
     else:
         out["candidate_profile"] = None
+    try:
+        from app.plugins.runtime import runtime
+        rules = runtime.get_config('subscription-core')
+    except Exception:
+        rules = {}
+    if rules.get('version_scores'):
+        current = out['current_profile']
+        current['score'] = _quality_score_from_features(current, config=rules)
+        if out['candidate_profile']:
+            candidate = out['candidate_profile']
+            candidate['is_new_model_uncensored_crack'] = bool(features.get('is_new_model_uncensored_crack'))
+            candidate['score'] = _quality_score_from_features(candidate, config=rules)
+            candidate['improvement'] = candidate['score'] - current['score']
+            candidate['required_improvement'] = rules.get('upgrade_score_threshold', 20)
     recent = out.get("recent_candidates") if isinstance(out.get("recent_candidates"), list) else []
     out["recent_candidates"] = recent[:8]
     return out
@@ -852,16 +917,16 @@ def _download_identity(sub: dict[str, Any]) -> dict[str, str]:
     best = sub.get("best_resource") if isinstance(sub.get("best_resource"), dict) else {}
     resource = best.get("resource") if isinstance(best.get("resource"), dict) else best
     return {
-        "hash": str(torrent.get("hash") or "").lower(),
-        "task_id": str(task.get("id") or ""),
+        "hash": str(torrent.get("hash") or result.get("info_hash") or "").lower(),
+        "task_id": str(task.get("id") or result.get("task_id") or ""),
         "name": str(torrent.get("name") or task.get("name") or sub.get("code") or "").strip().lower(),
         "url": str(resource.get("url") or best.get("url") or "").strip(),
     }
 
 
 def _download_stage(downloader_id: str, task: dict[str, Any]) -> dict[str, Any]:
-    progress = max(0.0, min(float(task.get("progress") or 0), 1.0))
-    raw_state = str(task.get("state") or task.get("phase") or "").strip()
+    progress = max(0.0, min(float(task.get("progress") or 0) / (100 if downloader_id == "115" else 1), 1.0))
+    raw_state = str(task.get("state") or task.get("phase") or task.get("status") or "").strip()
     state = raw_state.lower()
     if downloader_id == "qbittorrent":
         if progress >= 1 or state in {"uploading", "stalledup", "queuedup", "forcedup", "stoppedup", "pausedup", "checkingup"}:
@@ -875,13 +940,15 @@ def _download_stage(downloader_id: str, task: dict[str, Any]) -> dict[str, Any]:
         else:
             stage, label, tone = "downloading", "下载中", "primary"
     else:
-        if progress >= 1 or "complete" in state:
+        if "error" in state or "fail" in state:
+            stage, label, tone = "error", "下载异常", "danger"
+        elif progress >= 1 or state == "completed":
             stage, label, tone = "completed", "下载完成 · 等待入库", "success"
         elif "error" in state or "fail" in state:
             stage, label, tone = "error", "下载异常", "danger"
         elif "paused" in state:
             stage, label, tone = "paused", "下载已暂停", "warning"
-        elif "pending" in state:
+        elif state in {"pending", "queued"}:
             stage, label, tone = "queued", "等待下载", "info"
         else:
             stage, label, tone = "downloading", "下载中", "primary"
@@ -896,7 +963,8 @@ def _download_stage(downloader_id: str, task: dict[str, Any]) -> dict[str, Any]:
         "name": str(task.get("name") or ""),
         "savepath": str(task.get("save_path") or task.get("savepath") or task.get("real_path") or ""),
         "speed": int(task.get("dlspeed") or task.get("speed") or 0),
-        "message": str(task.get("message") or ""),
+        "message": str(task.get("error") or task.get("message") or ""),
+        "pipeline_status": str(task.get("pipeline_status") or ""),
     }
 
 
@@ -917,6 +985,9 @@ async def _attach_download_statuses(subscriptions: list[dict[str, Any]]) -> list
             elif downloader_id == "xunlei-remote":
                 response = await runtime.handle_action(downloader_id, "tasks", {"phase": "all", "limit": 500})
                 tasks = response.get("tasks") if isinstance(response, dict) else []
+            elif downloader_id == "115":
+                response = await runtime.handle_action(downloader_id, "tasks", {"limit": 500})
+                tasks = response.get("items") if isinstance(response, dict) else []
             else:
                 continue
             tasks = [task for task in (tasks or []) if isinstance(task, dict)]
@@ -1000,6 +1071,7 @@ async def _create_subscription(config: dict[str, Any], payload: dict[str, Any]) 
         "mode": str(payload.get("mode") or config.get("default_mode") or "loose"),
         "require_cracked": bool(payload.get("require_cracked", config.get("default_require_cracked", False))),
         "require_subtitle": bool(payload.get("require_subtitle", config.get("default_require_subtitle", False))),
+        "allow_normal": bool(payload.get("allow_normal", False)),
         "status": "active",
         "push_status": "idle",
         "submit_attempts": 0,
@@ -1038,9 +1110,16 @@ async def _create_subscription(config: dict[str, Any], payload: dict[str, Any]) 
 
 async def _submit_best_download(config: dict[str, Any], sub: dict[str, Any], resource: dict[str, Any], *, automatic: bool = True, force: bool = False) -> dict[str, Any]:
     from app.plugins.runtime import runtime
+    latest_config = runtime.get_config('subscription-core')
+    if latest_config.get('version_enabled', {}).get(_version_key(_features(resource)), True) is False:
+        raise ValueError('该版本类别已关闭，禁止提交')
+    from app.plugins.runtime import runtime
 
     if not resource:
         raise ValueError("没有可推送的匹配资源")
+    from app.core.resource_links import invalid_ed2k
+    if invalid_ed2k(resource):
+        raise ValueError('ED2K 链接不完整，禁止提交；请重新检测')
     if not _is_retry_due(sub):
         return {"ok": False, "deferred": True, "reason": "retry_not_due", "retry_after_at": sub.get("retry_after_at")}
     resource_key = _resource_submit_key(resource)
@@ -1055,6 +1134,8 @@ async def _submit_best_download(config: dict[str, Any], sub: dict[str, Any], res
     url = str(resolved.get("url") or resolved_item.get("url") or "").strip()
     if not url:
         raise ValueError("资源链接解析失败")
+    if invalid_ed2k({'url': url}):
+        raise ValueError('解析后的 ED2K 链接不完整，禁止提交；请重新检测')
     compatible = [str(x) for x in (resolved_item.get("compatible_downloaders") or []) if str(x or "").strip()]
     preferred = str(resolved_item.get("preferred_downloader") or "").strip()
     downloader_id = _select_enabled_downloader(preferred, compatible, runtime)
@@ -1078,6 +1159,8 @@ async def _submit_best_download(config: dict[str, Any], sub: dict[str, Any], res
         "source_plugin_id": provider_id,
         "subscription_id": sub.get("id"),
         "subscription_code": sub.get("code"),
+        "cover_url": sub.get("cover_url") or resolved_item.get("cover_url") or "",
+        "fanart_url": sub.get("fanart_url") or resolved_item.get("fanart_url") or "",
     }
     if savepath:
         payload["savepath"] = savepath
@@ -1101,19 +1184,29 @@ async def _submit_best_download(config: dict[str, Any], sub: dict[str, Any], res
     sub["retry_after_at"] = ""
     sub["submitted_downloader_id"] = downloader_id
     sub["submitted_result"] = result
+    sub["submitted_resource"] = json.loads(json.dumps(resource))
     sub["updated_at"] = _now()
     return {"ok": True, "downloader_id": downloader_id, "result": result}
 
 async def _check_subscription(config: dict[str, Any], sub: dict[str, Any], *, submit: bool | None = None) -> dict[str, Any]:
     code = str(sub.get("search_code") or sub.get("code") or "")
     resources = await _search_resources(code, limit=24)
+    from app.core.resource_links import invalid_ed2k
+    previous = sub.get('best_resource') or {}
+    if sub.get('last_submit_error') and invalid_ed2k(previous.get('resource') or previous):
+        sub['last_submit_error'] = ''
+        sub['last_submit_error_kind'] = ''
+        sub['push_status'] = 'idle'
+        sub['status'] = 'active'
     candidates = []
     for item in resources:
+        if invalid_ed2k(item):
+            continue
         if not _resource_matches_code(item, code):
             continue
         if _is_consumed_resource(sub, item):
             continue
-        ok, reason = _matches(sub, item)
+        ok, reason = _matches(sub, item, config)
         if not ok:
             continue
         entry = dict(item)
@@ -1122,7 +1215,7 @@ async def _check_subscription(config: dict[str, Any], sub: dict[str, Any], *, su
         entry["subscription_features"] = _features(item)
         entry["match_reason"] = reason
         candidates.append(entry)
-    candidates.sort(key=lambda item: _preference_rank(sub, item))
+    candidates.sort(key=lambda item: _preference_rank(sub, item, config))
     best = candidates[0] if candidates else None
     sub["last_checked_at"] = _now()
     sub["updated_at"] = sub["last_checked_at"]
@@ -1209,11 +1302,19 @@ async def _run_due_checks(config: dict[str, Any], *, sub_id: str = "", force: bo
         normalized_waits = _normalize_waiting_quota_records(data)
         targets = [s for s in data["subscriptions"] if s.get("status") != "deleted" and (not sub_id or s.get("id") == sub_id)]
         targets = [s for s in targets if _should_check_subscription(s, force=force)]
-        if limit > 0:
-            targets = targets[:limit]
+        targets = _limit_targets_per_downloader(targets, limit)
+        # Downloader lanes run concurrently. A slow or quota-limited Xunlei
+        # request must not delay 115/qB resource checks and submissions.
+        checked = await asyncio.gather(
+            *(_check_subscription(config, sub, submit=submit) for sub in targets),
+            return_exceptions=True,
+        )
         results = []
-        for sub in targets:
-            result = await _check_subscription(config, sub, submit=submit)
+        for sub, checked_result in zip(targets, checked):
+            if isinstance(checked_result, BaseException):
+                result = {"best": None, "candidates": [], "submit_result": None, "submit_error": _public_error_message(checked_result)}
+            else:
+                result = checked_result
             results.append({
                 "id": sub.get("id"),
                 "code": sub.get("code"),
@@ -1448,8 +1549,28 @@ async def _reconcile_submitted(data: dict[str, Any], *, config: dict[str, Any] |
         old_path = str(sub.get("current_file_path") or "")
         new_path = str(media.get("path") or "")
         submitted_best = sub.get("best_resource") if isinstance(sub.get("best_resource"), dict) else {}
-        submitted_resource = submitted_best.get("resource") if isinstance(submitted_best.get("resource"), dict) else submitted_best
-        media = await _select_imported_variant(media, submitted_resource, old_path)
+        submitted_resource = sub.get("submitted_resource") or (submitted_best.get("resource") if isinstance(submitted_best.get("resource"), dict) else submitted_best)
+        if sub.get("submitted_downloader_id") == "115":
+            from app.core.ownership import ownership
+            from app.core.version_evidence import bind_115
+            from app.api.endpoints.media_library_helpers import load_config, server_url
+            from app.plugins.runtime import runtime
+            lookup = await ownership.lookup(lookup_codes)
+            entries = {item['id']: item for result in lookup['results'].values() for item in result['items']}
+            task_id = _download_identity(sub)['task_id']
+            tasks = await runtime.handle_action('115', 'tasks', {'limit': 500})
+            task = next((task for task in tasks.get('items', []) if str(task.get('id')) == task_id), {})
+            # Legacy subscriptions must still point at the exact resource submitted.
+            key = _resource_submit_key(submitted_resource)
+            if not sub.get('submitted_resource') and key != sub.get('last_submit_resource_key'):
+                task = {}
+            media = await asyncio.to_thread(bind_115, server_url(load_config()), list(entries.values()), task, task_id, _features(submitted_resource), key)
+            if not media:
+                pending += 1
+                _event(data, sub.get('id', ''), 'warning', '等待入库关联：未能唯一匹配 115 下载任务与 Emby 文件，保留旧版')
+                continue
+        else:
+            media = await _select_imported_variant(media, submitted_resource, old_path)
         new_path = str(media.get("path") or "")
         profile_matches = _media_matches_resource_profile(media, submitted_resource)
         changed_in_place = bool(old_path and new_path and Path(old_path) == Path(new_path) and _same_path_was_replaced(sub, new_path))
@@ -1469,6 +1590,11 @@ async def _reconcile_submitted(data: dict[str, Any], *, config: dict[str, Any] |
         confirmed += 1
 
         if old_type == "upgrade" and old_path and new_path and old_path != new_path:
+            if media.get('version_evidence'):
+                sub['cleanup_suggestion'] = {'old_path': old_path, 'new_path': new_path, 'status': 'pending', 'reason': '下载产物已确认入库；旧版保留，等待用户确认清理。', 'created_at': _now()}
+                _event(data, sub.get('id', ''), 'success', '洗版新版本已入库，旧版保留待确认清理', {'old_path': old_path, 'new_path': new_path})
+                await _record_core_outcome(sub, 'library_imported', {'path': new_path, 'cleanup': 'pending'})
+                continue
             cleanup = {
                 "old_path": old_path,
                 "new_path": new_path,
@@ -1507,6 +1633,38 @@ async def _reconcile_submitted(data: dict[str, Any], *, config: dict[str, Any] |
 async def handle_action(action: str, payload: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
     payload = payload or {}
+    if action in {'rules', 'save_rules'}:
+        if action == 'save_rules':
+            mode = payload.get('default_mode')
+            priority = payload.get('preference_priority')
+            threshold = payload.get('upgrade_score_threshold')
+            if mode not in {'loose', 'strict'} or priority not in {'cracked', 'subtitle'}:
+                raise ValueError('无效的订阅规则')
+            if type(threshold) is not int or not 0 <= threshold <= 100:
+                raise ValueError('提升分数必须是 0–100 的整数')
+            for key in ('default_require_cracked', 'default_require_subtitle'):
+                if type(payload.get(key)) is not bool: raise ValueError('偏好必须为布尔值')
+            from app.plugins.runtime import runtime
+            values = {key: payload[key] for key in ('default_mode', 'preference_priority', 'upgrade_score_threshold', 'default_require_cracked', 'default_require_subtitle')}
+            scores = payload.get('version_scores')
+            if not isinstance(scores, dict) or set(scores) != set(VERSION_SCORES) or any(type(v) is not int or not 0 <= v <= 500 for v in scores.values()):
+                raise ValueError('每个版本的分数必须是 0–500 的整数')
+            values['version_scores'] = scores
+            enabled = payload.get('version_enabled')
+            if not isinstance(enabled, dict) or set(enabled) != set(VERSION_SCORES) or any(type(v) is not bool for v in enabled.values()):
+                raise ValueError('版本开关必须为布尔值')
+            values['version_enabled'] = enabled
+            await runtime.update_config('subscription-core', values)
+            config = {**config, **values}
+        return {'ok': True, 'rules': {
+            'default_mode': config.get('default_mode', 'loose'),
+            'default_require_cracked': bool(config.get('default_require_cracked')),
+            'default_require_subtitle': bool(config.get('default_require_subtitle')),
+            'preference_priority': config.get('preference_priority', 'cracked'),
+            'upgrade_score_threshold': config.get('upgrade_score_threshold', 20),
+            'version_scores': _version_scores(config),
+            'version_enabled': {key: config.get('version_enabled', {}).get(key, True) for key in VERSION_SCORES},
+        }}
     data = _ensure_store()
     await _sync_core_history(data)
     if _normalize_waiting_quota_records(data):
@@ -1564,6 +1722,47 @@ async def handle_action(action: str, payload: dict[str, Any], config: dict[str, 
         _event(data, sub_id, "info", "已确认旧版本处理建议", {"old_path": suggestion.get("old_path"), "new_path": suggestion.get("new_path")})
         _save(data)
         return {"ok": True, "subscription": _public_subscription(sub)}
+    if action == "cleanup_old_version":
+        sub_id = str(payload.get("id") or "")
+        sub = next((s for s in data["subscriptions"] if s.get("id") == sub_id and s.get("status") != "deleted"), None)
+        if not sub:
+            raise ValueError("订阅不存在")
+        suggestion = sub.get("cleanup_suggestion") if isinstance(sub.get("cleanup_suggestion"), dict) else None
+        if not suggestion or suggestion.get("status") != "pending":
+            raise ValueError("没有待处理的旧版本")
+        old_path = str(suggestion.get("old_path") or "").strip()
+        new_path = str(suggestion.get("new_path") or "").strip()
+        from app.core.ownership import ownership
+        lookup = await ownership.lookup(_subscription_code_values(sub))
+        imported = [item for state in lookup["results"].values() for item in state["items"] if str(item.get("path") or "") == new_path and item.get("version_evidence")]
+        expected_key = str(sub.get("last_consumed_resource_key") or "")
+        imported = [item for item in imported if str(item["version_evidence"].get("resource_key") or "") == expected_key]
+        if len({str(item.get("id") or "") for item in imported}) != 1:
+            raise ValueError("115 新版入库证据已失效或不唯一，已保留本地旧版")
+        suggestion["status"] = "running"
+        suggestion["started_at"] = _now()
+        _save(data)
+        try:
+            from app.api.endpoints import media_library
+            result = await asyncio.to_thread(media_library.delete_local_media_chain, old_path, str(sub.get("code") or ""))
+        except Exception as exc:
+            suggestion["status"] = "pending"
+            suggestion["last_error"] = _public_error_message(exc)
+            suggestion["failed_at"] = _now()
+            sub["updated_at"] = suggestion["failed_at"]
+            _event(data, sub_id, "error", f"旧版一键清理失败：{suggestion['last_error']}", {"old_path": old_path, "new_path": new_path})
+            _save(data)
+            raise ValueError(suggestion["last_error"]) from exc
+        suggestion["status"] = "completed"
+        suggestion["completed_at"] = _now()
+        suggestion["reason"] = "115 新版保持入库，本地旧版及其硬链接源链已清理。"
+        suggestion["result"] = result
+        suggestion.pop("last_error", None)
+        sub["updated_at"] = suggestion["completed_at"]
+        _event(data, sub_id, "success", "旧版一键清理完成", {"old_path": old_path, "new_path": new_path})
+        await _record_core_outcome(sub, "upgrade_completed", {"evidence_id": f"{sub_id}:{new_path}:cleanup", "old_path": old_path, "new_path": new_path, "cleanup": "completed"})
+        _save(data)
+        return {"ok": True, "result": result, "subscription": _public_subscription(sub)}
     if action == "apply_defaults":
         ids = [str(x) for x in (payload.get("ids") or []) if str(x or "").strip()]
         target_type = str(payload.get("type") or "").strip()
@@ -1591,7 +1790,7 @@ async def handle_action(action: str, payload: dict[str, Any], config: dict[str, 
         sub = next((s for s in data["subscriptions"] if s.get("id") == sub_id), None)
         if not sub:
             raise ValueError("订阅不存在")
-        for key in ["mode", "require_cracked", "require_subtitle", "status", "title"]:
+        for key in ["mode", "require_cracked", "require_subtitle", "allow_normal", "status", "title"]:
             if key in payload:
                 sub[key] = payload[key]
         sub["updated_at"] = _now()

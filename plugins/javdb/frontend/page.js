@@ -624,7 +624,50 @@ export async function mount(root, sdk) {
       .filter(Boolean)
   }
 
+  let ownershipTimer = null
+  let ownershipDisposed = false
+  let ownershipRequest = 0
+  const ownershipCache = new Map()
+
+  async function loadOwnershipStates() {
+    clearTimeout(ownershipTimer)
+    const request = ++ownershipRequest
+    const works = state.items.filter(item => item.code)
+    if (!works.length || ownershipDisposed) return
+    for (const item of works) {
+      const cached = ownershipCache.get(item.code)
+      if (cached) {
+        item.__ownership = cached.state
+        item.__libraryItems = cached.items
+      }
+    }
+    try {
+      const res = await sdk.api.post('/core/ownership/lookup', { codes: [...new Set(works.map(item => item.code))] })
+      if (ownershipDisposed || request !== ownershipRequest) return
+      for (const item of works) {
+        const ownership = res.data?.results?.[item.code]
+        if (ownership?.state === 'owned' || ownership?.state === 'absent') {
+          ownershipCache.set(item.code, ownership)
+          item.__ownership = ownership.state
+          item.__libraryItems = ownership.items || []
+        } else if (!item.__ownership) item.__ownership = 'unknown'
+        item.__ownershipStale = !!res.data?.stale || ownership?.state === 'unknown'
+      }
+      renderGrid()
+    } catch {
+      if (ownershipDisposed || request !== ownershipRequest) return
+      for (const item of works) {
+        if (!item.__ownership) item.__ownership = 'unknown'
+        item.__ownershipStale = true
+      }
+      renderGrid()
+    } finally {
+      if (!ownershipDisposed && request === ownershipRequest) ownershipTimer = setTimeout(loadOwnershipStates, 30000)
+    }
+  }
+
   async function loadSubscriptionStates() {
+    void loadOwnershipStates()
     try {
       const res = await sdk.api.post('/plugins/subscription-core/actions/overview', { payload: {} })
       const map = new Map()
@@ -647,13 +690,13 @@ export async function mount(root, sdk) {
 
   function subscriptionActionModel(videoData) {
     const sub = subscriptionStateFor(videoData)
-    const isInLibrary = !!videoData?.library?.in_library
     if (sub) {
       const running = ['matched', 'submitted', 'waiting_quota', 'submit_failed'].includes(String(sub.status || ''))
       if (sub.type === 'upgrade') return { label: running ? '洗版中' : '洗版中', state: 'upgrade-active', disabled: true }
       return { label: running ? '已订阅' : '已订阅', state: 'subscribed', disabled: true }
     }
-    return isInLibrary
+    if (!videoData.__ownership || videoData.__ownership === 'unknown') return { label: '入库状态待确认', state: 'unknown', disabled: true }
+    return videoData.__ownership === 'owned'
       ? { label: '洗版', state: 'upgrade', disabled: false }
       : { label: '订阅', state: 'subscribe', disabled: false }
   }
@@ -1544,6 +1587,7 @@ export async function mount(root, sdk) {
       defaultMode: 'loose',
       requireCracked: false,
       requireSubtitle: false,
+      allowNormal: false,
       onSuccess: async result => {
         sdk.toast?.success?.(result?.created ? '订阅已创建' : '订阅已存在')
         await loadSubscriptionStates()
@@ -1617,12 +1661,28 @@ export async function mount(root, sdk) {
       if (ed2kCount > 0) badges.push(sdk.ui.badge({ label: `${ed2kCount} ED2K`, tone: 'info' }))
       if (item.has_cnsub || item.play_subtitle) badges.push(sdk.ui.badge({ label: '中字', tone: 'success' }))
       if (item.is_cracked) badges.push(sdk.ui.badge({ label: '破解', tone: 'danger' }))
-      if (item.library?.in_library) badges.push(sdk.ui.badge({ label: '已入库', tone: 'info' }))
+      if (item.__ownership === 'owned') {
+        const libraryBadge = sdk.ui.badge({
+          label: '已入库', tone: 'info',
+          onClick: event => {
+            event.preventDefault()
+            event.stopPropagation()
+            const matches = item.__libraryItems || []
+            const query = { q: item.code }
+            if (matches.length === 1 && matches[0].id) query.detail = String(matches[0].id)
+            sdk.navigate({ path: '/library', query })
+          },
+        })
+        libraryBadge.type = 'button'
+        libraryBadge.title = '在媒体库中查看该作品'
+        badges.push(libraryBadge)
+      }
 
       const actionModel = subscriptionActionModel(item)
       const subscribeAction = el('button', `noor-plugin-badge javdb-subscribe-action javdb-subscribe-action--${actionModel.state}`, actionModel.label)
       subscribeAction.type = 'button'
       subscribeAction.disabled = !!actionModel.disabled
+      if (item.__ownershipStale) subscribeAction.title = '媒体库状态正在同步，暂时显示上次确认结果；提交时将由 Core 再次核实'
       subscribeAction.onclick = event => {
         event.stopPropagation()
         event.preventDefault()
@@ -2056,6 +2116,9 @@ export async function mount(root, sdk) {
   window.addEventListener('resize', onResize)
 
   return () => {
+    ownershipDisposed = true
+    ownershipRequest += 1
+    clearTimeout(ownershipTimer)
     loadSeq += 1
     window.removeEventListener('resize', onResize)
     clearTimeout(resizeTimer)

@@ -1,11 +1,21 @@
 {
   "id": "subscription-core",
   "name": "订阅中心",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "tool",
   "description": "NOOR 官方内置订阅与洗版中心。",
-  "tags": ["official", "subscription", "upgrade", "resource"],
-  "capabilities": ["sidebar_page", "subscription_core", "resource_match", "download_submit"],
+  "tags": [
+    "official",
+    "subscription",
+    "upgrade",
+    "resource"
+  ],
+  "capabilities": [
+    "sidebar_page",
+    "subscription_core",
+    "resource_match",
+    "download_submit"
+  ],
   "contributions": {
     "sidebar": {
       "label": "订阅中心",

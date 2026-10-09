@@ -106,16 +106,25 @@ def _normalize(item: dict[str, Any], index: int) -> dict[str, Any] | None:
         str(item.get("category") or ""),
         str(item.get("smallDescr") or item.get("small_description") or ""),
     ])
-    is_cracked = bool(
-        item.get("uc")
-        or item.get("is_cracked")
-        or item.get("uncensored")
-        or re.search(r"破解|uncensored\s*(?:crack|leak)?|crack|leak|流出", feature_text, re.I)
+    uc_suffix = bool(re.search(r"(?:^|[-_.\s])UC(?:$|[-_.\s])", feature_text, re.I))
+    explicit_cracked = bool(
+        item.get("is_cracked")
+        or re.search(r"破解|uncensored\s*(?:crack|leak)|\bcrack(?:ed)?\b|\bleak(?:ed)?\b|流出", feature_text, re.I)
     )
+    uncensored_signal = bool(item.get("uncensored"))
+    explicit_censored = bool(
+        item.get("mosaic") in {True, 1, "1", "true", "True"}
+        or re.search(r"亚洲有码|有碼|有码|\bcensored\b", feature_text, re.I)
+    )
+    # Some AVDB records currently expose both ``uc=true`` and ``mosaic=true``.
+    # The explicit mosaic/censored evidence is stronger than the ambiguous UC
+    # flag; a real crack/leak marker may still override it.
+    is_cracked = explicit_cracked or uc_suffix or (uncensored_signal and not explicit_censored)
     has_subtitle = bool(
         item.get("chinese")
         or item.get("has_subtitle")
         or item.get("hasChineseSubtitle")
+        or uc_suffix
         or re.search(r"中字|中文字幕|中文|字幕|\b(?:chs|cht)\b", feature_text, re.I)
     )
     private = bool(item.get("private") or item.get("is_private") or item.get("private_tracker"))

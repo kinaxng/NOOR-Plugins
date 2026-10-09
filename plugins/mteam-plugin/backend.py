@@ -828,9 +828,30 @@ async def search_resources(query: dict[str, Any], config: dict[str, Any]) -> dic
 
 async def resolve_resource_download(resource: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     url = str(resource.get("url") or "").strip()
-    if not url:
-        raise ValueError("M-Team 资源没有可用下载地址；请填写 Passkey 或确认 API Key 权限")
-    return {"item": resource, "url": url}
+    if url:
+        return {"item": resource, "url": url}
+
+    metadata = resource.get("metadata") if isinstance(resource.get("metadata"), dict) else {}
+    torrent_id = str(
+        metadata.get("torrent_id")
+        or resource.get("torrent_id")
+        or resource.get("torrentId")
+        or resource.get("id")
+        or ""
+    ).strip()
+    if torrent_id.startswith("mteam:"):
+        torrent_id = torrent_id.split(":", 1)[1]
+    if not torrent_id:
+        raise ValueError("M-Team 资源缺少种子 ID，无法生成下载地址")
+    if not str(config.get("api_key") or "").strip():
+        raise ValueError("M-Team 尚未配置 API Key，无法生成下载地址")
+
+    download_url = await _mteam_post(config, "/api/torrent/genDlToken", params={"id": torrent_id})
+    url = str(download_url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("M-Team API 未返回有效下载地址，请确认 API Key 具有种子下载权限")
+    item = {**resource, "url": url}
+    return {"item": item, "url": url}
 
 def get_cached_image(image_id: str) -> tuple[Path, str] | None:
     return get_cached_plugin_image(PLUGIN_ID, image_id)
@@ -1043,7 +1064,7 @@ def _mteam_headers(config: dict[str, Any]) -> dict[str, str]:
     return {"Accept": "application/json", "x-api-key": token}
 
 
-async def _mteam_post(config: dict[str, Any], path: str, *, params: dict[str, Any] | None = None, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
+async def _mteam_post(config: dict[str, Any], path: str, *, params: dict[str, Any] | None = None, json_body: dict[str, Any] | None = None) -> Any:
     base_url = (config.get("base_url") or "https://test2.m-team.cc").rstrip("/")
     async with httpx.AsyncClient(timeout=float(config.get("timeout", 15)), follow_redirects=True, trust_env=False) as client:
         resp = await client.post(f"{base_url}{path}", headers=_mteam_headers(config), params=params, json=json_body)

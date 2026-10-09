@@ -1,37 +1,213 @@
 {
   "id": "av-recommend",
   "name": "推荐中心",
-  "version": "1.64.1",
+  "version": "1.64.2",
   "description": "基于媒体库偏好、JavDB 候选、完整候选池与资源可用性的推荐中心。",
   "type": "knowledge_app",
-  "tags": ["official", "recommendation", "knowledge", "javdb"],
-  "capabilities": ["sidebar_page", "knowledge_view", "recommendation_provider"],
+  "tags": [
+    "official",
+    "recommendation",
+    "knowledge",
+    "javdb"
+  ],
+  "capabilities": [
+    "sidebar_page",
+    "knowledge_view",
+    "recommendation_provider"
+  ],
   "enabled_by_default": true,
   "config_schema": {
-    "candidate_limit": {"type": "number", "label": "候选扫描数量", "default": 48, "min": 12, "max": 120, "step": 12},
-    "detail_limit": {"type": "number", "label": "详情分析数量", "description": "用于读取演员、类型和资源特征的候选数量。", "default": 48, "min": 8, "max": 80, "step": 4},
-    "resource_enrich_limit": {"type": "number", "label": "资源确认数量", "description": "对最终展示的推荐卡确认各资源源站的可用资源。", "default": 60, "min": 0, "max": 100, "step": 4},
-    "resource_enrich_concurrency": {"type": "number", "label": "资源确认并发数", "description": "同时向资源源站确认的作品数量。", "default": 4, "min": 1, "max": 12, "step": 1},
-    "resource_enrich_budget_seconds": {"type": "number", "label": "页面资源确认预算", "description": "展示推荐前最多等待资源确认的秒数，超时项不阻塞页面。", "default": 6, "min": 1, "max": 20, "step": 1},
-    "recommendation_cache_minutes": {"type": "number", "label": "推荐缓存时间（分钟）", "description": "按推荐模式和配置持久保存结果；主动刷新、偏好反馈或候选池变化时立即失效。", "default": 30, "min": 5, "max": 1440, "step": 5},
-    "full_scan_pages": {"type": "number", "label": "完整推荐扫描页数", "description": "后台增量扫描 JavDB 完整作品列表的页数。", "default": 5, "min": 1, "max": 30, "step": 1},
-    "full_scan_background_enabled": {"type": "boolean", "label": "启用完整推荐后台扫描", "default": true},
-    "full_scan_interval_minutes": {"type": "number", "label": "完整推荐扫描间隔（分钟）", "default": 360, "min": 30, "max": 1440, "step": 30},
-    "candidate_latest_enabled": {"type": "boolean", "label": "候选源：最新更新", "default": true},
-    "candidate_rankings_enabled": {"type": "boolean", "label": "候选源：日/周/月榜", "default": true},
-    "candidate_recommend_enabled": {"type": "boolean", "label": "候选源：JavDB 推荐", "default": true},
-    "candidate_videos_enabled": {"type": "boolean", "label": "候选源：完整库", "default": true},
-    "library_exclusion_scan_limit": {"type": "number", "label": "媒体库排除扫描上限", "description": "推荐生成时从 Emby 实时读取的番号上限，用于排除尚未进入 Knowledge Core 的已入库作品。", "default": 5000, "min": 500, "max": 20000, "step": 500},
-    "prefer_cracked": {"type": "boolean", "label": "推荐时偏好破解", "default": true},
-    "prefer_subtitle": {"type": "boolean", "label": "推荐时偏好中字", "default": true},
-    "prefer_cracked_strength": {"type": "number", "label": "破解偏好强度", "description": "0 到 100，控制破解特征在动作分中的权重。", "default": 100, "min": 0, "max": 100, "step": 5},
-    "prefer_subtitle_strength": {"type": "number", "label": "中字偏好强度", "description": "0 到 100，控制中字特征在动作分中的权重。", "default": 100, "min": 0, "max": 100, "step": 5},
-    "exploration_ratio": {"type": "number", "label": "探索比例", "description": "在最终推荐列表中保留的低分探索位比例，0 到 0.5。", "default": 0, "min": 0, "max": 0.5, "step": 0.05},
-    "adaptive_exploration_enabled": {"type": "boolean", "label": "自适应探索", "description": "根据媒体库成熟度和真实转化样本自动保留少量可信新方向；关闭后仅使用手动探索比例。", "default": true},
-    "minimum_confidence_threshold": {"type": "number", "label": "最低置信度", "description": "过滤置信度低于该值的候选，0 到 80。", "default": 0, "min": 0, "max": 80, "step": 5},
-    "adaptive_cold_start_enabled": {"type": "boolean", "label": "自适应冷启动", "description": "媒体库样本不足时自动混入少量高可用、多题材候选，并随画像成熟逐步退出。", "default": true},
-    "cold_start_min_library_size": {"type": "number", "label": "冷启动样本门槛", "description": "媒体库达到该作品数量后完全使用个性化模型。", "default": 20, "min": 5, "max": 100, "step": 5},
-    "ranking_model_policy": {"type": "select", "label": "推荐模型策略", "description": "自动模式会根据真实曝光转化和共享候选影子评估保护性切换。", "default": "auto", "options": [{"label": "自动保护", "value": "auto"}, {"label": "个性化模型", "value": "personal"}, {"label": "稳定模型", "value": "stable"}]}
+    "candidate_limit": {
+      "type": "number",
+      "label": "候选扫描数量",
+      "default": 48,
+      "min": 12,
+      "max": 120,
+      "step": 12
+    },
+    "detail_limit": {
+      "type": "number",
+      "label": "详情分析数量",
+      "description": "用于读取演员、类型和资源特征的候选数量。",
+      "default": 48,
+      "min": 8,
+      "max": 80,
+      "step": 4
+    },
+    "resource_enrich_limit": {
+      "type": "number",
+      "label": "资源确认数量",
+      "description": "对最终展示的推荐卡确认各资源源站的可用资源。",
+      "default": 60,
+      "min": 0,
+      "max": 100,
+      "step": 4
+    },
+    "resource_enrich_concurrency": {
+      "type": "number",
+      "label": "资源确认并发数",
+      "description": "同时向资源源站确认的作品数量。",
+      "default": 4,
+      "min": 1,
+      "max": 12,
+      "step": 1
+    },
+    "resource_enrich_budget_seconds": {
+      "type": "number",
+      "label": "页面资源确认预算",
+      "description": "展示推荐前最多等待资源确认的秒数，超时项不阻塞页面。",
+      "default": 6,
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "recommendation_cache_minutes": {
+      "type": "number",
+      "label": "推荐缓存时间（分钟）",
+      "description": "按推荐模式和配置持久保存结果；主动刷新、偏好反馈或候选池变化时立即失效。",
+      "default": 30,
+      "min": 5,
+      "max": 1440,
+      "step": 5
+    },
+    "full_scan_pages": {
+      "type": "number",
+      "label": "完整推荐扫描页数",
+      "description": "后台增量扫描 JavDB 完整作品列表的页数。",
+      "default": 5,
+      "min": 1,
+      "max": 30,
+      "step": 1
+    },
+    "full_scan_background_enabled": {
+      "type": "boolean",
+      "label": "启用完整推荐后台扫描",
+      "default": true
+    },
+    "full_scan_interval_minutes": {
+      "type": "number",
+      "label": "完整推荐扫描间隔（分钟）",
+      "default": 360,
+      "min": 30,
+      "max": 1440,
+      "step": 30
+    },
+    "candidate_latest_enabled": {
+      "type": "boolean",
+      "label": "候选源：最新更新",
+      "default": true
+    },
+    "candidate_rankings_enabled": {
+      "type": "boolean",
+      "label": "候选源：日/周/月榜",
+      "default": true
+    },
+    "candidate_recommend_enabled": {
+      "type": "boolean",
+      "label": "候选源：JavDB 推荐",
+      "default": true
+    },
+    "candidate_videos_enabled": {
+      "type": "boolean",
+      "label": "候选源：完整库",
+      "default": true
+    },
+    "library_exclusion_scan_limit": {
+      "type": "number",
+      "label": "媒体库排除扫描上限",
+      "description": "推荐生成时从 Emby 实时读取的番号上限，用于排除尚未进入 Knowledge Core 的已入库作品。",
+      "default": 5000,
+      "min": 500,
+      "max": 20000,
+      "step": 500
+    },
+    "prefer_cracked": {
+      "type": "boolean",
+      "label": "推荐时偏好破解",
+      "default": true
+    },
+    "prefer_subtitle": {
+      "type": "boolean",
+      "label": "推荐时偏好中字",
+      "default": true
+    },
+    "prefer_cracked_strength": {
+      "type": "number",
+      "label": "破解偏好强度",
+      "description": "0 到 100，控制破解特征在动作分中的权重。",
+      "default": 100,
+      "min": 0,
+      "max": 100,
+      "step": 5
+    },
+    "prefer_subtitle_strength": {
+      "type": "number",
+      "label": "中字偏好强度",
+      "description": "0 到 100，控制中字特征在动作分中的权重。",
+      "default": 100,
+      "min": 0,
+      "max": 100,
+      "step": 5
+    },
+    "exploration_ratio": {
+      "type": "number",
+      "label": "探索比例",
+      "description": "在最终推荐列表中保留的低分探索位比例，0 到 0.5。",
+      "default": 0,
+      "min": 0,
+      "max": 0.5,
+      "step": 0.05
+    },
+    "adaptive_exploration_enabled": {
+      "type": "boolean",
+      "label": "自适应探索",
+      "description": "根据媒体库成熟度和真实转化样本自动保留少量可信新方向；关闭后仅使用手动探索比例。",
+      "default": true
+    },
+    "minimum_confidence_threshold": {
+      "type": "number",
+      "label": "最低置信度",
+      "description": "过滤置信度低于该值的候选，0 到 80。",
+      "default": 0,
+      "min": 0,
+      "max": 80,
+      "step": 5
+    },
+    "adaptive_cold_start_enabled": {
+      "type": "boolean",
+      "label": "自适应冷启动",
+      "description": "媒体库样本不足时自动混入少量高可用、多题材候选，并随画像成熟逐步退出。",
+      "default": true
+    },
+    "cold_start_min_library_size": {
+      "type": "number",
+      "label": "冷启动样本门槛",
+      "description": "媒体库达到该作品数量后完全使用个性化模型。",
+      "default": 20,
+      "min": 5,
+      "max": 100,
+      "step": 5
+    },
+    "ranking_model_policy": {
+      "type": "select",
+      "label": "推荐模型策略",
+      "description": "自动模式会根据真实曝光转化和共享候选影子评估保护性切换。",
+      "default": "auto",
+      "options": [
+        {
+          "label": "自动保护",
+          "value": "auto"
+        },
+        {
+          "label": "个性化模型",
+          "value": "personal"
+        },
+        {
+          "label": "稳定模型",
+          "value": "stable"
+        }
+      ]
+    }
   },
   "default_config": {
     "candidate_limit": 48,
@@ -60,7 +236,11 @@
     "ranking_model_policy": "auto"
   },
   "contributions": {
-    "sidebar": {"label": "推荐中心", "route": "/plugins/av-recommend", "icon": "icons/service.svg"},
+    "sidebar": {
+      "label": "推荐中心",
+      "route": "/plugins/av-recommend",
+      "icon": "icons/service.svg"
+    },
     "icon": "icons/service.svg"
   },
   "frontend": {

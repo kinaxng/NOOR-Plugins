@@ -43,7 +43,11 @@ def _base_url(config: dict[str, Any]) -> str:
     return str(config.get("base_url") or "http://127.0.0.1:9208").strip().rstrip("/")
 
 
-def _headers(config: dict[str, Any], *, accept: str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8") -> dict[str, str]:
+def _headers(
+    config: dict[str, Any],
+    *,
+    accept: str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+) -> dict[str, str]:
     headers = {
         "Accept": accept,
         "User-Agent": "NOOR/1.0 (+mdc-ng-manual)",
@@ -67,22 +71,40 @@ class _MdcClient:
         self.config = config
 
     async def get(self, path: str) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=_timeout(self.config), follow_redirects=True, trust_env=False) as client:
-            return await client.get(f"{_base_url(self.config)}{path}", headers=_headers(self.config))
+        async with httpx.AsyncClient(
+            timeout=_timeout(self.config), follow_redirects=True, trust_env=False
+        ) as client:
+            return await client.get(
+                f"{_base_url(self.config)}{path}", headers=_headers(self.config)
+            )
 
-    async def post_text_action(self, path: str, action_id: str, payload: Any) -> httpx.Response:
+    async def post_text_action(
+        self, path: str, action_id: str, payload: Any
+    ) -> httpx.Response:
         headers = _headers(self.config, accept="text/x-component")
         headers["Next-Action"] = action_id
         headers["Content-Type"] = "text/plain;charset=UTF-8"
-        async with httpx.AsyncClient(timeout=_timeout(self.config), follow_redirects=True, trust_env=False) as client:
-            return await client.post(f"{_base_url(self.config)}{path}", headers=headers, content=json.dumps(payload, ensure_ascii=False))
+        async with httpx.AsyncClient(
+            timeout=_timeout(self.config), follow_redirects=True, trust_env=False
+        ) as client:
+            return await client.post(
+                f"{_base_url(self.config)}{path}",
+                headers=headers,
+                content=json.dumps(payload, ensure_ascii=False),
+            )
 
-    async def post_form_action(self, path: str, action_id: str, data: list[tuple[str, str]]) -> httpx.Response:
+    async def post_form_action(
+        self, path: str, action_id: str, data: list[tuple[str, str]]
+    ) -> httpx.Response:
         headers = _headers(self.config, accept="text/x-component")
         headers["Next-Action"] = action_id
-        async with httpx.AsyncClient(timeout=_timeout(self.config), follow_redirects=True, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=_timeout(self.config), follow_redirects=True, trust_env=False
+        ) as client:
             files = [(key, (None, value)) for key, value in data]
-            return await client.post(f"{_base_url(self.config)}{path}", headers=headers, files=files)
+            return await client.post(
+                f"{_base_url(self.config)}{path}", headers=headers, files=files
+            )
 
 
 def _extract_first_json_line(text: str) -> dict[str, Any]:
@@ -124,6 +146,30 @@ def _find_json_objects(text: str, marker: str) -> list[dict[str, Any]]:
     return out
 
 
+def _find_json_object_arrays(text: str, marker: str) -> list[dict[str, Any]]:
+    """Extract arrays of objects following a marker from decoded RSC text."""
+    decoder = json.JSONDecoder()
+    out: list[dict[str, Any]] = []
+    pos = 0
+    while True:
+        idx = text.find(marker, pos)
+        if idx < 0:
+            break
+        start = idx + len(marker)
+        if start >= len(text) or text[start] != "[":
+            pos = start
+            continue
+        try:
+            value, end = decoder.raw_decode(text[start:])
+        except Exception:
+            pos = start + 1
+            continue
+        if isinstance(value, list):
+            out.extend(item for item in value if isinstance(item, dict))
+        pos = start + end
+    return out
+
+
 def _next_f_payloads(html: str) -> list[str]:
     """Decode Next.js RSC payload strings before looking for embedded records.
 
@@ -136,7 +182,7 @@ def _next_f_payloads(html: str) -> list[str]:
     prefix = "self.__next_f.push([1,"
     for match in re.finditer(re.escape(prefix), html):
         try:
-            value, _ = decoder.raw_decode(html[match.end():])
+            value, _ = decoder.raw_decode(html[match.end() :])
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if isinstance(value, str):
@@ -194,9 +240,13 @@ def _normalize_job(job: dict[str, Any], base_url: str) -> dict[str, Any]:
         "source_paths": _safe_json_list(job.get("source_pathes")),
         "target_dir": job.get("target_dir") or "",
         "link_mode": int(job.get("link_mode") or 0),
-        "link_mode_label": LINK_MODE_LABELS.get(int(job.get("link_mode") or 0), str(job.get("link_mode") or "")),
+        "link_mode_label": LINK_MODE_LABELS.get(
+            int(job.get("link_mode") or 0), str(job.get("link_mode") or "")
+        ),
         "status": int(job.get("status") or 0),
-        "status_label": STATUS_LABELS.get(int(job.get("status") or 0), str(job.get("status") or "")),
+        "status_label": STATUS_LABELS.get(
+            int(job.get("status") or 0), str(job.get("status") or "")
+        ),
         "stage": int(job.get("stage") or 0),
         "created_at": job.get("created_at") or "",
         "started_at": job.get("started_at") or "",
@@ -236,7 +286,9 @@ def _noor_status_from_external(job: dict[str, Any] | None) -> str:
     return "failed"
 
 
-def _noor_progress_from_external(job: dict[str, Any] | None, *, status: str | None = None) -> int:
+def _noor_progress_from_external(
+    job: dict[str, Any] | None, *, status: str | None = None
+) -> int:
     if not job:
         return 0
     resolved_status = status or _noor_status_from_external(job)
@@ -245,7 +297,12 @@ def _noor_progress_from_external(job: dict[str, Any] | None, *, status: str | No
     if resolved_status in {"failed", "cancelled", "skipped"}:
         return 0
     total = int(job.get("total_count") or 0)
-    done = int(job.get("finish_count") or 0) + int(job.get("skip_count") or 0) + int(job.get("error_count") or 0) + int(job.get("abort_count") or 0)
+    done = (
+        int(job.get("finish_count") or 0)
+        + int(job.get("skip_count") or 0)
+        + int(job.get("error_count") or 0)
+        + int(job.get("abort_count") or 0)
+    )
     if total > 0:
         progress = int(round(done / total * 100))
         if resolved_status == "running":
@@ -273,14 +330,18 @@ def _build_external_task_data(
     return payload
 
 
-def _match_remote_job_for_local(local_job: Job, remote_jobs: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _match_remote_job_for_local(
+    local_job: Job, remote_jobs: list[dict[str, Any]]
+) -> dict[str, Any] | None:
     metadata = local_job.result_metadata or {}
     ext = metadata.get("external_task") if isinstance(metadata, dict) else {}
     if isinstance(ext, dict):
         remote_id = ext.get("external_id")
         data = ext.get("data") if isinstance(ext.get("data"), dict) else {}
         remote_job = data.get("remote_job") if isinstance(data, dict) else None
-        remote_id = remote_id or (remote_job.get("id") if isinstance(remote_job, dict) else None)
+        remote_id = remote_id or (
+            remote_job.get("id") if isinstance(remote_job, dict) else None
+        )
         if remote_id is not None:
             for candidate in remote_jobs:
                 if str(candidate.get("id")) == str(remote_id):
@@ -298,16 +359,36 @@ async def _create_noor_job_for_remote_submission(
     payload: dict[str, Any],
     submit_result: dict[str, Any],
 ) -> dict[str, Any]:
-    source_paths = _parse_source_paths(payload.get("source_paths") or payload.get("paths") or payload.get("sources"))
-    original_source_paths = _parse_source_paths(payload.get("original_source_paths")) or source_paths
+    source_paths = _parse_source_paths(
+        payload.get("source_paths") or payload.get("paths") or payload.get("sources")
+    )
+    original_source_paths = (
+        _parse_source_paths(payload.get("original_source_paths")) or source_paths
+    )
     defaults = await _fetch_defaults(config)
-    target_folder = str(payload.get("target_folder") or defaults.get("target_folder") or "").strip()
+    target_folder = str(
+        payload.get("target_folder") or defaults.get("target_folder") or ""
+    ).strip()
     display_name = _display_name_for_paths(source_paths)
-    remote_job = submit_result.get("remote_job") if isinstance(submit_result, dict) else None
-    noor_status = _noor_status_from_external(remote_job) if submit_result.get("ok") else "failed"
-    progress = _noor_progress_from_external(remote_job, status=noor_status) if submit_result.get("ok") else 0
-    detail = submit_result.get("message") or (remote_job.get("status_label") if isinstance(remote_job, dict) else None)
-    error_message = None if submit_result.get("ok") else (submit_result.get("message") or "提交失败")
+    remote_job = (
+        submit_result.get("remote_job") if isinstance(submit_result, dict) else None
+    )
+    noor_status = (
+        _noor_status_from_external(remote_job) if submit_result.get("ok") else "failed"
+    )
+    progress = (
+        _noor_progress_from_external(remote_job, status=noor_status)
+        if submit_result.get("ok")
+        else 0
+    )
+    detail = submit_result.get("message") or (
+        remote_job.get("status_label") if isinstance(remote_job, dict) else None
+    )
+    error_message = (
+        None
+        if submit_result.get("ok")
+        else (submit_result.get("message") or "提交失败")
+    )
     job = await create_external_task_job(
         provider_id=PLUGIN_ID,
         provider_label="MDC-NG",
@@ -320,12 +401,19 @@ async def _create_noor_job_for_remote_submission(
         error_message=error_message,
         can_cancel=False,
         data={
-            **_build_external_task_data(source_paths, target_folder, remote_job if isinstance(remote_job, dict) else None),
+            **_build_external_task_data(
+                source_paths,
+                target_folder,
+                remote_job if isinstance(remote_job, dict) else None,
+            ),
             "original_source_paths": original_source_paths,
         },
         phase_label="MDC-NG 重新整理",
     )
-    await job_manager.add_log(job.id, f"MDC-NG 提交结果: {submit_result.get('message') or ('成功' if submit_result.get('ok') else '失败')}")
+    await job_manager.add_log(
+        job.id,
+        f"MDC-NG 提交结果: {submit_result.get('message') or ('成功' if submit_result.get('ok') else '失败')}",
+    )
     if isinstance(remote_job, dict):
         await job_manager.add_log(job.id, f"MDC-NG 任务 ID: {remote_job.get('id')}")
     submit_result["noor_job_id"] = job.id
@@ -336,7 +424,9 @@ async def _create_noor_job_for_remote_submission(
 async def _fetch_defaults(config: dict[str, Any]) -> dict[str, Any]:
     client = _MdcClient(config)
     ts = int(time.time() * 1000)
-    resp = await client.post_text_action("/manual-jobs", "607cd0d4b9dd96a2410d82956a9b3427020d2353c1", ["common", ts])
+    resp = await client.post_text_action(
+        "/manual-jobs", "607cd0d4b9dd96a2410d82956a9b3427020d2353c1", ["common", ts]
+    )
     resp.raise_for_status()
     payload = _extract_first_json_line(resp.text)
     global_cfg = payload.get("global") or {}
@@ -344,15 +434,19 @@ async def _fetch_defaults(config: dict[str, Any]) -> dict[str, Any]:
     for idx, item in enumerate(global_cfg.get("watch_dirs") or []):
         if not isinstance(item, dict):
             continue
-        watch_dirs.append({
-            "index": idx,
-            "path": str(item.get("path") or "").strip(),
-            "has_override": bool(item.get("config_override")),
-        })
+        watch_dirs.append(
+            {
+                "index": idx,
+                "path": str(item.get("path") or "").strip(),
+                "has_override": bool(item.get("config_override")),
+            }
+        )
     return {
         "target_folder": str(global_cfg.get("target_folder") or "").strip(),
         "link_mode": int(global_cfg.get("link_mode") or 0),
-        "delete_empty_parent_after_move": bool(global_cfg.get("delete_empty_parent_after_move")),
+        "delete_empty_parent_after_move": bool(
+            global_cfg.get("delete_empty_parent_after_move")
+        ),
         "watch_dirs": watch_dirs,
     }
 
@@ -372,8 +466,47 @@ async def _fetch_jobs(config: dict[str, Any]) -> list[dict[str, Any]]:
         except Exception:
             continue
         dedup[job_id] = job
-    items = [_normalize_job(job, _base_url(config)) for _, job in sorted(dedup.items(), key=lambda item: item[0], reverse=True)]
+    items = [
+        _normalize_job(job, _base_url(config))
+        for _, job in sorted(dedup.items(), key=lambda item: item[0], reverse=True)
+    ]
     return items
+
+
+async def _fetch_organized_results(
+    config: dict[str, Any], source_prefix: str
+) -> list[dict[str, Any]]:
+    """Read only the latest completed task rows under one exact source tree."""
+    prefix = source_prefix.strip().rstrip("/")
+    if not prefix.startswith("/"):
+        raise ValueError("source_prefix must be an absolute MDC-NG path")
+    client = _MdcClient(config)
+    resp = await client.get("/tasks")
+    resp.raise_for_status()
+    rows: list[dict[str, Any]] = []
+    for payload in [resp.text, *_next_f_payloads(resp.text)]:
+        rows.extend(_find_json_object_arrays(payload, '"tasks":'))
+    dedup: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            task_id = int(row.get("id"))
+        except (TypeError, ValueError):
+            continue
+        source_path = str(row.get("source_path") or "")
+        if source_path != prefix and not source_path.startswith(f"{prefix}/"):
+            continue
+        if int(row.get("status") or 0) != 2 or not str(row.get("target_path") or ""):
+            continue
+        dedup[task_id] = {
+            "id": task_id,
+            "source_path": source_path,
+            "target_path": str(row.get("target_path") or ""),
+            "number": str(row.get("number") or ""),
+            "status": 2,
+            "created_at": str(row.get("created_at") or ""),
+            "end_at": str(row.get("end_at") or ""),
+        }
+    return [dedup[key] for key in sorted(dedup, reverse=True)]
 
 
 def _parse_source_paths(value: Any) -> list[str]:
@@ -405,12 +538,16 @@ def _map_source_path(config: dict[str, Any], path: str) -> str:
         if path == source:
             return target
         if path.startswith(f"{source}/"):
-            return f"{target}{path[len(source):]}"
+            return f"{target}{path[len(source) :]}"
     return path
 
 
-async def _create_manual_job(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    source_paths = _parse_source_paths(payload.get("source_paths") or payload.get("paths") or payload.get("sources"))
+async def _create_manual_job(
+    config: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    source_paths = _parse_source_paths(
+        payload.get("source_paths") or payload.get("paths") or payload.get("sources")
+    )
     if not source_paths:
         raise ValueError("至少填写一个刮削路径")
     defaults: dict[str, Any] | None = None
@@ -434,11 +571,15 @@ async def _create_manual_job(config: dict[str, Any], payload: dict[str, Any]) ->
         except Exception:
             reuse_index = None
     if "delete_empty_parent_after_move" in payload:
-        delete_empty_parent_after_move = bool(payload.get("delete_empty_parent_after_move"))
+        delete_empty_parent_after_move = bool(
+            payload.get("delete_empty_parent_after_move")
+        )
     else:
         if defaults is None:
             defaults = await _fetch_defaults(config)
-        delete_empty_parent_after_move = bool(defaults.get("delete_empty_parent_after_move"))
+        delete_empty_parent_after_move = bool(
+            defaults.get("delete_empty_parent_after_move")
+        )
     ts = int(time.time() * 1000)
     bound = [
         ts,
@@ -448,17 +589,21 @@ async def _create_manual_job(config: dict[str, Any], payload: dict[str, Any]) ->
         "$K1",
     ]
     form_data: list[tuple[str, str]] = [("1__pathes", path) for path in source_paths]
-    form_data.extend([
-        ("1_target_folder", target_folder),
-        ("1_link_mode", str(link_mode)),
-        ("0", json.dumps(bound, ensure_ascii=False)),
-    ])
+    form_data.extend(
+        [
+            ("1_target_folder", target_folder),
+            ("1_link_mode", str(link_mode)),
+            ("0", json.dumps(bound, ensure_ascii=False)),
+        ]
+    )
     if delete_empty_parent_after_move:
         form_data.append(("1_delete_empty_parent_after_move", "on"))
     client = _MdcClient(config)
     before_jobs = await _fetch_jobs(config)
     before_ids = {str(job.get("id")) for job in before_jobs}
-    resp = await client.post_form_action("/manual-jobs", "7cae04395aa159ff837a4b1ead83c053a8dac5204f", form_data)
+    resp = await client.post_form_action(
+        "/manual-jobs", "7cae04395aa159ff837a4b1ead83c053a8dac5204f", form_data
+    )
     resp.raise_for_status()
     result = _extract_first_json_line(resp.text)
     ok = result.get("status") == "SUCCESS"
@@ -466,7 +611,9 @@ async def _create_manual_job(config: dict[str, Any], payload: dict[str, Any]) ->
     jobs: list[dict[str, Any]] = []
     if ok:
         jobs = await _fetch_jobs(config)
-        remote_job = next((job for job in jobs if str(job.get("id")) not in before_ids), None)
+        remote_job = next(
+            (job for job in jobs if str(job.get("id")) not in before_ids), None
+        )
     return {
         "ok": ok,
         "status": result.get("status") or "",
@@ -477,8 +624,12 @@ async def _create_manual_job(config: dict[str, Any], payload: dict[str, Any]) ->
     }
 
 
-async def sync_external_tasks(config: dict[str, Any], *, job_id: str | None = None) -> dict[str, Any]:
-    local_jobs = await list_provider_external_jobs(PLUGIN_ID, job_id=job_id, active_only=not bool(job_id))
+async def sync_external_tasks(
+    config: dict[str, Any], *, job_id: str | None = None
+) -> dict[str, Any]:
+    local_jobs = await list_provider_external_jobs(
+        PLUGIN_ID, job_id=job_id, active_only=not bool(job_id)
+    )
     if not local_jobs:
         return {"updated": 0}
 
@@ -486,20 +637,34 @@ async def sync_external_tasks(config: dict[str, Any], *, job_id: str | None = No
     updated = 0
     for local_job in local_jobs:
         remote_job = _match_remote_job_for_local(local_job, remote_jobs)
-        next_status = _noor_status_from_external(remote_job) if remote_job else local_job.status
-        next_progress = _noor_progress_from_external(remote_job, status=next_status) if remote_job else local_job.progress
+        next_status = (
+            _noor_status_from_external(remote_job) if remote_job else local_job.status
+        )
+        next_progress = (
+            _noor_progress_from_external(remote_job, status=next_status)
+            if remote_job
+            else local_job.progress
+        )
         next_detail = (
             remote_job.get("status_label")
             if isinstance(remote_job, dict)
             else local_job.detail
         )
-        next_error = remote_job.get("error_message") if isinstance(remote_job, dict) and next_status in {"failed", "cancelled"} else None
+        next_error = (
+            remote_job.get("error_message")
+            if isinstance(remote_job, dict) and next_status in {"failed", "cancelled"}
+            else None
+        )
         metadata = local_job.result_metadata or {}
         ext = metadata.get("external_task") if isinstance(metadata, dict) else None
         if isinstance(ext, dict):
             data = ext.get("data") if isinstance(ext.get("data"), dict) else {}
             data = {**data, "remote_job": remote_job or data.get("remote_job")}
-            ext = {**ext, "external_id": _remote_id(remote_job) or ext.get("external_id"), "data": data}
+            ext = {
+                **ext,
+                "external_id": _remote_id(remote_job) or ext.get("external_id"),
+                "data": data,
+            }
             metadata = {**metadata, "external_task": ext}
         updated_job = await set_external_task_state(
             local_job.id,
@@ -532,7 +697,9 @@ async def test(config: dict[str, Any]) -> PluginTestResult:
         return PluginTestResult(ok=False, message=f"MDC-NG 连接失败: {exc}", details={})
 
 
-async def handle_action(action: str, config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+async def handle_action(
+    action: str, config: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
     if action == "overview":
         defaults = await _fetch_defaults(config)
         jobs = await _fetch_jobs(config)
@@ -548,10 +715,27 @@ async def handle_action(action: str, config: dict[str, Any], payload: dict[str, 
                 "failed": sum(1 for job in jobs if job["status"] in (-2, -1)),
             },
         }
+    if action == "organized_results":
+        source_prefix = str(payload.get("source_prefix") or "")
+        items = await _fetch_organized_results(config, source_prefix)
+        limit = max(1, min(int(payload.get("limit") or 100), 500))
+        return {"ok": True, "items": items[:limit]}
     if action == "create":
-        original_source_paths = _parse_source_paths(payload.get("source_paths") or payload.get("paths") or payload.get("sources"))
-        mapped_source_paths = [_map_source_path(config, path) for path in original_source_paths]
-        mapped_payload = {**payload, "source_paths": mapped_source_paths, "original_source_paths": original_source_paths}
+        original_source_paths = _parse_source_paths(
+            payload.get("source_paths")
+            or payload.get("paths")
+            or payload.get("sources")
+        )
+        mapped_source_paths = [
+            _map_source_path(config, path) for path in original_source_paths
+        ]
+        mapped_payload = {
+            **payload,
+            "source_paths": mapped_source_paths,
+            "original_source_paths": original_source_paths,
+        }
         result = await _create_manual_job(config, mapped_payload)
-        return await _create_noor_job_for_remote_submission(config, mapped_payload, result)
+        return await _create_noor_job_for_remote_submission(
+            config, mapped_payload, result
+        )
     raise ValueError(f"unsupported action: {action}")

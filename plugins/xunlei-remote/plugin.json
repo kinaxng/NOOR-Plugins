@@ -1,7 +1,7 @@
 {
   "id": "xunlei-remote",
   "name": "迅雷远程",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "downloader",
   "description": "通过群晖迅雷 NAS Web API 管理远程下载任务，并自动使用可用的试用加速次数。",
   "tags": [

@@ -1,9 +1,9 @@
 {
   "id": "javdb",
   "name": "JavDB",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "rss_source",
-  "description": "JavDB/DB Online 接入：榜单、最新、搜索、演员、Top250、磁链、ED2K 与元数据，并贡献到 Knowledge Core。",
+  "description": "JavDB/DB Online 接入：榜单、最新、搜索、演员、Top250、磁链、ED2K 与元数据。",
   "tags": [
     "javdb",
     "metadata",

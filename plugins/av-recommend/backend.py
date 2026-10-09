@@ -77,7 +77,6 @@ VERIFIED_CONVERSION_THRESHOLD = 0.95
 OUTCOME_LEARNING_MIN_TRIALS = 12
 DEFAULT_CACHE_TTL = 1800
 _CACHE: dict[str, Any] = {"entries": {}}
-_LIVE_LIBRARY_CODES_CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "codes": set(), "warning": ""}
 _pool_lock = asyncio.Lock()
 _recommendation_generation_locks = {"latest": asyncio.Lock(), "full": asyncio.Lock()}
 _recommendation_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -769,104 +768,13 @@ def _candidate_code(item: dict[str, Any]) -> str:
     )
 
 
-def _media_library_item_codes(item: dict[str, Any]) -> set[str]:
-    values: list[Any] = [
-        item.get("code"),
-        item.get("number"),
-        item.get("num"),
-        item.get("name"),
-        item.get("title"),
-        item.get("original_title"),
-        item.get("file_path"),
-        item.get("path"),
-        item.get("emby_path"),
-    ]
-    provider_ids = item.get("provider_ids")
-    if isinstance(provider_ids, dict):
-        values.extend(provider_ids.values())
-    nfo = item.get("nfo")
-    if isinstance(nfo, dict):
-        values.extend(nfo.get(key) for key in ("num", "id", "code", "title", "originaltitle"))
-    siblings = item.get("siblings")
-    if isinstance(siblings, list):
-        for sibling in siblings:
-            if isinstance(sibling, dict):
-                values.extend(sibling.get(key) for key in ("label", "name", "file_path", "path"))
-    codes = {_norm_code(value) for value in values if _norm_code(value)}
-    combined = " ".join(str(value or "") for value in values)
-    code = _norm_code(combined)
-    if code:
-        codes.add(code)
-    return codes
-
-
-def _media_library_cache_key(config: dict[str, Any]) -> str:
-    try:
-        from app.api.endpoints.media_library_helpers import load_config
-
-        media_config = load_config()
-    except Exception:
-        media_config = {}
-    return json.dumps({
-        "server_url": media_config.get("server_url") or "",
-        "api_key": bool(media_config.get("api_key")),
-        "user_id": media_config.get("user_id") or "",
-        "enabled_library_ids": media_config.get("enabled_library_ids") or "",
-        "limit": config.get("library_exclusion_scan_limit") or "",
-    }, ensure_ascii=False, sort_keys=True)
-
-
 async def _live_library_codes(config: dict[str, Any], *, force: bool = False) -> tuple[set[str], str]:
-    """Fetch a lightweight Emby code set so recommendations track fresh library changes.
-
-    Knowledge Core is still the primary profile source.  This is only a TTL
-    exclusion guard for recently added media that has not been indexed yet.
-    """
-    cache_key = _media_library_cache_key(config)
-    now = time.time()
-    if not force and _LIVE_LIBRARY_CODES_CACHE.get("key") == cache_key and now - float(_LIVE_LIBRARY_CODES_CACHE.get("ts") or 0) < 300:
-        return set(_LIVE_LIBRARY_CODES_CACHE.get("codes") or set()), str(_LIVE_LIBRARY_CODES_CACHE.get("warning") or "")
-    try:
-        from app.api.endpoints import media_library
-        from app.api.endpoints.media_library_helpers import load_config
-
-        media_config = load_config()
-        if not media_config.get("server_url") or not media_config.get("api_key"):
-            return set(), ""
-        enabled = [value.strip() for value in str(media_config.get("enabled_library_ids") or "").split(",") if value.strip()]
-        limit = max(100, min(int(config.get("library_exclusion_scan_limit") or 5000), 20000))
-        page_limit = 500
-        codes: set[str] = set()
-        targets: list[dict[str, Any]] = []
-        if enabled:
-            targets = [{"id": value} for value in enabled]
-        else:
-            targets = await media_library._list_libraries(media_config)
-        for library in targets:
-            library_id = library.get("id")
-            offset = 0
-            while len(codes) < limit:
-                items, _ = await media_library._list_items(
-                    media_config,
-                    library_id=library_id,
-                    limit=min(page_limit, limit - len(codes)),
-                    offset=offset,
-                    force_refresh=force,
-                )
-                if not items:
-                    break
-                for item in items:
-                    if isinstance(item, dict):
-                        codes.update(_media_library_item_codes(item))
-                offset += len(items)
-                if len(items) < page_limit:
-                    break
-        _LIVE_LIBRARY_CODES_CACHE.update({"ts": now, "key": cache_key, "codes": set(codes), "warning": ""})
-        return codes, ""
-    except Exception as exc:
-        warning = f"实时媒体库排除失败：{exc}"
-        _LIVE_LIBRARY_CODES_CACHE.update({"ts": now, "key": cache_key, "codes": set(), "warning": warning})
-        return set(), warning
+    from app.core.ownership import ownership
+    await ownership.snapshot(force=force)
+    status = await ownership.lookup([])
+    if status["stale"]:
+        raise RuntimeError("Core 媒体库状态尚未确认，暂缓生成推荐")
+    return set(ownership.items), ""
 
 
 def _ensure_store() -> dict[str, Any]:
@@ -1922,8 +1830,6 @@ def _outcome_calibration(outcome_model: dict[str, Any], actor_identities: list[s
     calibrated_rate = sum(rate * weight for rate, weight in groups) / group_weight
     trials = max(0, int(outcome_model.get("trials") or 0))
     global_reliability = trials / (trials + OUTCOME_LEARNING_MIN_TRIALS)
-    # The strongest matched feature controls evidence quality. More correlated
-    # labels may refine the rate estimate, but cannot manufacture sample size.
     reliability = min(global_reliability, max(weight for _rate, weight in groups))
     score = max(-6.0, min(6.0, (calibrated_rate - 0.5) * 18 * reliability))
     return {"score": score, "rate": calibrated_rate, "reliability": reliability, "trials": float(trials)}
@@ -3940,6 +3846,9 @@ def _dedupe_recommendations(items: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 async def _merge_cached_resource_intelligence(result: dict[str, Any]) -> dict[str, Any]:
     items = result.get("items") if isinstance(result.get("items"), list) else []
+    owned, _ = await _live_library_codes({})
+    items = [item for item in items if _candidate_code(item) not in owned]
+    result = {**result, "items": items}
     if not items:
         return result
     try:
@@ -4409,6 +4318,7 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
     cold_start_strength = max(0.0, min(1.0, 1 - media_count / cold_start_threshold)) if config.get("adaptive_cold_start_enabled", True) else 0.0
     scoring_config = {**config, "_cold_start_strength": cold_start_strength, "_ranking_policy": model_selection["policy"]}
     live_codes, live_warning = await _live_library_codes(config, force=bool(payload.get("refresh")))
+    profile["codes"] = set(live_codes)
     mark_timing("library_profile")
     cache_key = json.dumps({
         "algorithm_version": RECOMMENDATION_ALGORITHM_VERSION,
@@ -4574,13 +4484,11 @@ async def _recommendations_unlocked(config: dict[str, Any], payload: dict[str, A
         warnings.append(f"Core 邻域召回暂不可用：{exc}")
     mark_timing("core_graph")
 
-    excluded_codes = set(profile.get("codes") or set())
-    excluded_codes.update(live_codes)
+    excluded_codes = set(live_codes)
     excluded_codes.update(_subscription_codes())
     candidates = [
         item for item in candidates
         if _candidate_code(item) not in excluded_codes
-        and not bool((item.get("library") or {}).get("in_library") if isinstance(item.get("library"), dict) else False)
     ]
     if live_warning:
         warnings.append(live_warning)

@@ -1,7 +1,7 @@
 {
   "id": "mdc-ng-manual",
   "name": "MDC-NG 手动任务",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "knowledge_app",
   "description": "向 MDC-NG 的手动任务页提交整理任务，并回看最近任务结果。",
   "tags": [
